@@ -438,6 +438,17 @@ async def get_conversation(conversation_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/chat/context/{conversation_id}")
+async def get_conversation_context(conversation_id: str, user_id: Optional[str] = Query(None)) -> Dict[str, Any]:
+    """Get dual (short-term + long-term) context for a conversation and user"""
+    try:
+        context = await chat_engine.memory_manager.get_conversation_context(conversation_id, user_id)
+        return context.model_dump()
+    except Exception as e:
+        logger.error("Failed to get conversation context", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/chat/conversation/{conversation_id}")
 async def delete_conversation(conversation_id: str) -> Dict[str, str]:
     """Delete a conversation"""

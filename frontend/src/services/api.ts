@@ -161,6 +161,23 @@ class ApiService {
   }
 
   /**
+   * Get conversation context (short-term + long-term)
+   */
+  async getConversationContext(conversationId: string, userId?: string) {
+    const params = userId ? `?user_id=${encodeURIComponent(userId)}` : '';
+    const response = await fetch(`${API_BASE_URL}/chat/context/${encodeURIComponent(conversationId)}${params}`, {
+      method: 'GET',
+      headers: this.headers,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get conversation context: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  /**
    * Delete conversation
    */
   async deleteConversation(conversationId: string) {
@@ -398,42 +415,19 @@ export class WebSocketService {
   }
 
   /**
-   * Get conversation list
+   * Check connection status
    */
-  getConversationList() {
-    this.send('list_conversations', {});
+  isConnected() {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 
   /**
-   * Get conversation history
-   */
-  getConversationHistory(conversationId: string) {
-    this.send('get_history', {
-      conversation_id: conversationId,
-    });
-  }
-
-  /**
-   * Send ping
-   */
-  ping() {
-    this.send('ping', {});
-  }
-
-  /**
-   * Disconnect
+   * Disconnect WebSocket
    */
   disconnect() {
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
-  }
-
-  /**
-   * Check if connected
-   */
-  isConnected(): boolean {
-    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { WebSocketService } from '@/services/api';
+import { WebSocketService, apiService } from '@/services/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -76,6 +76,9 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [waitingFor, setWaitingFor] = useState<string | null>(null);
   const [actionProgress, setActionProgress] = useState<number>(0);
+  const [useLongTerm, setUseLongTerm] = useState<boolean>(true);
+  const [contextWindow, setContextWindow] = useState<number>(10);
+  const [contextSummary, setContextSummary] = useState<any>(null);
   
   const wsRef = useRef<WebSocketService | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -91,6 +94,8 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
       setIsConnected(true);
       setConversationId(data.connection_id);
       addSystemMessage('Connected to assistant. How can I help you today?');
+      // Load initial context summary if available
+      refreshContext(data.connection_id);
     });
 
     ws.on('conversational_update', handleConversationalUpdate);
@@ -104,6 +109,22 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
       ws.disconnect();
     };
   }, [userId]);
+
+  const refreshContext = async (convId?: string) => {
+    try {
+      const id = convId || conversationId;
+      if (!id) return;
+      const ctx = await apiService.getConversationContext(id, userId);
+      setContextSummary({
+        entities: ctx.entities || [],
+        topics: ctx.topics || [],
+        shortTerm: ctx.short_term || {},
+        longTerm: ctx.long_term || {},
+      });
+    } catch (e) {
+      console.error('Failed to load context', e);
+    }
+  };
 
   const handleConversationalUpdate = (update: ConversationalUpdate) => {
     console.log('Conversational update:', update);
@@ -254,7 +275,9 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
       message: input,
       conversation_id: conversationId,
       conversational: true,
-      stream: true
+      stream: true,
+      context_window: contextWindow,
+      use_long_term_memory: useLongTerm,
     });
 
     // Mark as sent
@@ -332,115 +355,191 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
             )}
           </div>
         </div>
+
+        {/* Controls */}
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="flex items-center gap-2">
+            <input
+              id="lt-toggle"
+              type="checkbox"
+              checked={useLongTerm}
+              onChange={(e) => setUseLongTerm(e.target.checked)}
+            />
+            <label htmlFor="lt-toggle" className="text-sm">Use long-term memory</label>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-sm" htmlFor="ctx-window">Context window:</label>
+            <input
+              id="ctx-window"
+              type="number"
+              min={1}
+              max={50}
+              className="w-20 border rounded px-2 py-1 text-sm"
+              value={contextWindow}
+              onChange={(e) => setContextWindow(parseInt(e.target.value || '10', 10))}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => refreshContext()}>
+              <Database className="w-4 h-4 mr-1" /> Refresh context
+            </Button>
+          </div>
+        </div>
       </CardHeader>
 
       <CardContent className="flex-1 flex flex-col p-0 min-h-0">
-        <ScrollArea className="flex-1 p-4">
-          <div className="space-y-4">
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex ${
-                  message.role === 'user' ? 'justify-end' : 'justify-start'
-                }`}
-              >
-                <div
-                  className={`max-w-[70%] ${
-                    message.role === 'user'
-                      ? 'bg-primary text-primary-foreground'
-                      : message.role === 'system'
-                      ? 'bg-muted'
-                      : 'bg-secondary'
-                  } rounded-lg p-3 overflow-hidden`}
-                >
-                  <div className="flex items-start gap-2">
-                    {message.role === 'assistant' && <Bot className="w-4 h-4 mt-1" />}
-                    {message.role === 'user' && <User className="w-4 h-4 mt-1" />}
-                    <div className="flex-1">
-                      {message.intent && (
-                        <div className="flex items-center mb-2">
-                          {getIntentIcon(message.intent)}
-                          <span className="ml-1 text-sm font-medium capitalize">
-                            {message.intent.replace('_', ' ')}
-                          </span>
-                          {getConfidenceBadge(message.confidence)}
-                        </div>
-                      )}
-                      
-                      <div className="whitespace-pre-wrap break-words">{message.content}</div>
-                      
-                      {message.questions && (
-                        <div className="mt-3 space-y-2">
-                          <p className="text-sm font-medium">Please clarify:</p>
-                          {message.questions.map((q: string, i: number) => (
-                            <Button
-                              key={i}
-                              variant="outline"
-                              size="sm"
-                              className="w-full justify-start"
-                              onClick={() => setInput(q)}
-                            >
-                              {q}
-                            </Button>
-                          ))}
-                        </div>
-                      )}
-                      
-                      {message.preview && (
-                        <Card className="mt-3">
-                          <CardContent className="p-3">
-                            <h4 className="font-medium mb-2">Action Preview:</h4>
-                            <p className="text-sm">{message.preview.description}</p>
-                            <div className="mt-2 flex gap-2">
-                              {message.actions?.map((action: any) => (
+        <div className="grid grid-cols-1 lg:grid-cols-4 h-full">
+          {/* Chat pane */}
+          <div className="lg:col-span-3 border-r min-h-0 flex flex-col">
+            <ScrollArea className="flex-1 p-4">
+              <div className="space-y-4">
+                {messages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`flex ${
+                      message.role === 'user' ? 'justify-end' : 'justify-start'
+                    }`}
+                  >
+                    <div
+                      className={`max-w-[70%] ${
+                        message.role === 'user'
+                          ? 'bg-primary text-primary-foreground'
+                          : message.role === 'system'
+                          ? 'bg-muted'
+                          : 'bg-secondary'
+                      } rounded-lg p-3 overflow-hidden`}
+                    >
+                      <div className="flex items-start gap-2">
+                        {message.role === 'assistant' && <Bot className="w-4 h-4 mt-1" />}
+                        {message.role === 'user' && <User className="w-4 h-4 mt-1" />}
+                        <div className="flex-1">
+                          {message.intent && (
+                            <div className="flex items-center mb-2">
+                              {getIntentIcon(message.intent)}
+                              <span className="ml-1 text-sm font-medium capitalize">
+                                {message.intent.replace('_', ' ')}
+                              </span>
+                              {getConfidenceBadge(message.confidence)}
+                            </div>
+                          )}
+                          
+                          <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                          
+                          {message.questions && (
+                            <div className="mt-3 space-y-2">
+                              <p className="text-sm font-medium">Please clarify:</p>
+                              {message.questions.map((q: string, i: number) => (
                                 <Button
-                                  key={action.value}
+                                  key={i}
+                                  variant="outline"
                                   size="sm"
-                                  variant={action.value === 'confirm' ? 'default' : 'outline'}
-                                  onClick={() => handleAction(action.value)}
+                                  className="w-full justify-start"
+                                  onClick={() => setInput(q)}
                                 >
-                                  {action.label}
+                                  {q}
                                 </Button>
                               ))}
                             </div>
-                          </CardContent>
-                        </Card>
-                      )}
+                          )}
+                          
+                          {message.preview && (
+                            <Card className="mt-3">
+                              <CardContent className="p-3">
+                                <h4 className="font-medium mb-2">Action Preview:</h4>
+                                <p className="text-sm">{message.preview.description}</p>
+                                <div className="mt-2 flex gap-2">
+                                  {message.actions?.map((action: any) => (
+                                    <Button
+                                      key={action.value}
+                                      size="sm"
+                                      variant={action.value === 'confirm' ? 'default' : 'outline'}
+                                      onClick={() => handleAction(action.value)}
+                                    >
+                                      {action.label}
+                                    </Button>
+                                  ))}
+                                </div>
+                              </CardContent>
+                            </Card>
+                          )}
 
-                      {currentAction && (
-                        <div className="mt-3">
-                          <p className="text-sm font-medium">{currentAction}</p>
-                          <Progress value={actionProgress} className="h-2" />
+                          {currentAction && (
+                            <div className="mt-3">
+                              <p className="text-sm font-medium">{currentAction}</p>
+                              <Progress value={actionProgress} className="h-2" />
+                            </div>
+                          )}
                         </div>
-                      )}
+                      </div>
                     </div>
                   </div>
-                </div>
+                ))}
+                <div ref={messagesEndRef} />
               </div>
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
-        </ScrollArea>
+            </ScrollArea>
 
-        <div className="p-4 border-t">
-          <div className="flex gap-2 items-center">
-            <Button variant="outline" size="icon">
-              <Mic className="w-4 h-4" />
-            </Button>
-            <Button variant="outline" size="icon">
-              <Paperclip className="w-4 h-4" />
-            </Button>
-            <Input
-              ref={inputRef}
-              placeholder="Type your message..."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-            />
-            <Button onClick={sendMessage} disabled={!isConnected || !input.trim()}>
-              <Send className="w-4 h-4 mr-2" />
-              Send
-            </Button>
+            <div className="p-4 border-t">
+              <div className="flex gap-2 items-center">
+                <Button variant="outline" size="icon">
+                  <Mic className="w-4 h-4" />
+                </Button>
+                <Button variant="outline" size="icon">
+                  <Paperclip className="w-4 h-4" />
+                </Button>
+                <Input
+                  ref={inputRef}
+                  placeholder="Type your message..."
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+                />
+                <Button onClick={sendMessage} disabled={!isConnected || !input.trim()}>
+                  <Send className="w-4 h-4 mr-2" />
+                  Send
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Context pane */}
+          <div className="hidden lg:block p-4">
+            <h3 className="text-sm font-semibold mb-2 flex items-center"><Database className="w-4 h-4 mr-2" /> Context</h3>
+            {contextSummary ? (
+              <div className="space-y-3 text-sm">
+                <div>
+                  <div className="text-muted-foreground">Entities</div>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {(contextSummary.entities || []).slice(0, 12).map((e: string, i: number) => (
+                      <Badge key={i} variant="secondary">{e}</Badge>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Topics</div>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {(contextSummary.topics || []).slice(0, 12).map((t: string, i: number) => (
+                      <Badge key={i} variant="outline">{t}</Badge>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Short-term</div>
+                  <div className="mt-1">
+                    <div className="text-xs">Messages: {contextSummary.shortTerm?.message_count || 0}</div>
+                    <div className="text-xs">Session start: {contextSummary.shortTerm?.session_start || '-'}</div>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Long-term</div>
+                  <div className="mt-1 text-xs">Total memories: {contextSummary.longTerm?.total_memories || 0}</div>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => refreshContext()}>
+                  Refresh
+                </Button>
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">No context yet.</div>
+            )}
           </div>
         </div>
       </CardContent>
