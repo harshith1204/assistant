@@ -212,7 +212,7 @@ Generate actionable ideas based on these findings."""
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.7
+                temperature=settings.synthesis_temperature
             )
             
             result = json.loads(response.choices[0].message.content)
@@ -295,7 +295,7 @@ Write an executive summary."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.5,
-                max_tokens=500
+                max_tokens=settings.synthesis_max_tokens
             )
             
             return response.choices[0].message.content

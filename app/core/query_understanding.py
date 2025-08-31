@@ -112,7 +112,7 @@ class QueryUnderstanding:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": context}
                 ],
-                temperature=0.7
+                temperature=settings.query_understanding_temperature
             )
             
             result = json.loads(response.choices[0].message.content)

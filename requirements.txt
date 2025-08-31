@@ -8,6 +8,7 @@ pydantic-settings
 groq
 langchain
 tiktoken
+sentence-transformers
 
 # Web scraping and research
 httpx
@@ -56,6 +57,7 @@ structlog
 mem0ai
 chromadb
 qdrant-client
+sentence-transformers
 
 # Chat and WebSocket
 websockets
