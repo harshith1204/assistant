@@ -11,8 +11,7 @@ from app.chat_models import (
     ChatRequest, ChatResponse, WebSocketMessage,
     StreamChunk, MessageRole, MessageType
 )
-from app.core.chat_engine import ChatEngine
-from app.core.enhanced_chat_engine import EnhancedChatEngine
+from app.core.unified_chat_engine import UnifiedChatEngine
 
 logger = structlog.get_logger()
 
@@ -23,8 +22,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self.user_connections: Dict[str, Set[str]] = {}  # user_id -> connection_ids
-        self.chat_engine = ChatEngine()
-        self.enhanced_engine = EnhancedChatEngine()  # Enhanced conversational engine
+        self.chat_engine = UnifiedChatEngine()  # Unified chat engine
     
     async def connect(
         self,
@@ -154,7 +152,7 @@ class ConnectionManager:
                 )
             )
             
-            # Use enhanced conversational engine if enabled
+            # Use conversational mode if enabled
             if data.get("conversational", True):
                 await self.handle_conversational_message(
                     connection_id,
@@ -269,8 +267,8 @@ class ConnectionManager:
     ):
         """Handle conversational message with enhanced flow"""
         try:
-            # Process through enhanced engine
-            async for update in self.enhanced_engine.process_conversational_message(
+            # Process through unified engine's conversational mode
+            async for update in self.chat_engine.process_conversational_message(
                 request,
                 user_id
             ):
