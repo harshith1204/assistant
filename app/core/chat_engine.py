@@ -186,10 +186,16 @@ class ChatEngine:
             return self.conversations[conversation_id]
         
         # Create new conversation
-        conversation = Conversation(
-            conversation_id=conversation_id or None,
-            user_id=user_id
-        )
+        if conversation_id:
+            conversation = Conversation(
+                conversation_id=conversation_id,
+                user_id=user_id
+            )
+        else:
+            # Let the default factory generate a UUID
+            conversation = Conversation(
+                user_id=user_id
+            )
         
         # Load context if existing conversation
         if conversation_id:
