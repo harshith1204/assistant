@@ -2,7 +2,7 @@
 
 import json
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import httpx
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -412,7 +412,7 @@ class PMSClient:
         
         sections = [
             f"# Research Brief: {brief.get('query', 'Research')}",
-            f"\n**Date:** {brief.get('date', datetime.utcnow().isoformat())}",
+            f"\n**Date:** {brief.get('date', datetime.now(timezone.utc).isoformat())}",
             f"**Brief ID:** `{brief.get('brief_id', 'N/A')}`",
             f"\n## Executive Summary\n\n{brief.get('executive_summary', 'No summary available.')}",
             "\n## Key Questions\n"

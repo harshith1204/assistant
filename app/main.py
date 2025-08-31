@@ -397,7 +397,7 @@ async def list_conversations(
             "total": total,
             "limit": limit,
             "offset": offset,
-            "conversations": [s.dict() for s in summaries]
+            "conversations": [s.model_dump() for s in summaries]
         }
     except Exception as e:
         logger.error("Failed to list conversations", error=str(e))
@@ -428,7 +428,7 @@ async def get_conversation(conversation_id: str) -> Dict[str, Any]:
                 }
                 for msg in conversation.messages
             ],
-            "context": conversation.context.dict(),
+            "context": conversation.context.model_dump(),
             "status": conversation.status
         }
     except HTTPException:

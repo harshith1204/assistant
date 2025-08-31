@@ -1,7 +1,7 @@
 """Chat models for conversation management"""
 
 from typing import List, Optional, Dict, Any, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 import uuid
 from enum import Enum
@@ -33,7 +33,7 @@ class ChatMessage(BaseModel):
     role: MessageRole = Field(..., description="Message role")
     content: str = Field(..., description="Message content")
     message_type: MessageType = Field(MessageType.TEXT, description="Type of message")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, Any] = Field({}, description="Additional metadata")
     attachments: List[Dict[str, str]] = Field([], description="Attachments")
     
@@ -61,8 +61,8 @@ class Conversation(BaseModel):
     conversation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: Optional[str] = Field(None, description="User ID")
     title: Optional[str] = Field(None, description="Conversation title")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     messages: List[ChatMessage] = Field([], description="Conversation messages")
     context: ConversationContext = Field(default_factory=ConversationContext)
     status: str = Field("active", description="Conversation status")
@@ -72,7 +72,7 @@ class Conversation(BaseModel):
         """Add a message to the conversation"""
         message.conversation_id = self.conversation_id
         self.messages.append(message)
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
     
     def get_recent_messages(self, limit: int = 10) -> List[ChatMessage]:
         """Get recent messages"""
@@ -127,7 +127,7 @@ class WebSocketMessage(BaseModel):
     """WebSocket message format"""
     type: str = Field(..., description="Message type")
     data: Dict[str, Any] = Field(..., description="Message data")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     
 class StreamChunk(BaseModel):

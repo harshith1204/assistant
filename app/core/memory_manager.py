@@ -2,7 +2,7 @@
 
 import json
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 from mem0 import Memory
 import structlog
@@ -80,7 +80,7 @@ class MemoryManager:
             meta = metadata or {}
             meta.update({
                 "conversation_id": conversation_id,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "user_id": user_id or "anonymous"
             })
             
@@ -97,13 +97,13 @@ class MemoryManager:
                 self.short_term_cache[conversation_id] = {
                     "messages": [],
                     "context": {},
-                    "timestamp": datetime.utcnow()
+                    "timestamp": datetime.now(timezone.utc)
                 }
             
             self.short_term_cache[conversation_id]["messages"].append({
                 "content": content,
                 "metadata": meta,
-                "timestamp": datetime.utcnow()
+                "timestamp": datetime.now(timezone.utc)
             })
             
             logger.info(
@@ -168,7 +168,7 @@ class MemoryManager:
                 cache_data = self.short_term_cache[conversation_id]
                 context.short_term = {
                     "recent_messages": cache_data.get("messages", [])[-5:],
-                    "session_start": cache_data.get("timestamp", datetime.utcnow()).isoformat(),
+                    "session_start": cache_data.get("timestamp", datetime.now(timezone.utc)).isoformat(),
                     "message_count": len(cache_data.get("messages", []))
                 }
             
@@ -286,7 +286,7 @@ class MemoryManager:
                 metadata = {
                     "entities": list(set(entities)),
                     "topics": list(set(topics)),
-                    "extraction_timestamp": datetime.utcnow().isoformat()
+                    "extraction_timestamp": datetime.now(timezone.utc).isoformat()
                 }
                 
                 await self.add_to_memory(
@@ -308,7 +308,7 @@ class MemoryManager:
     async def cleanup_old_cache(self):
         """Clean up old short-term cache entries"""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             expired_conversations = []
             
             for conv_id, cache_data in self.short_term_cache.items():

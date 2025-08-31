@@ -2,7 +2,7 @@
 
 import asyncio
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import structlog
 import json
 
@@ -147,7 +147,7 @@ class ResearchEngine:
             
             brief = ResearchBrief(
                 query=request.query,
-                date=datetime.utcnow(),
+                date=datetime.now(timezone.utc),
                 entities=parsed.get('entities', []),
                 key_questions=key_questions,
                 findings=findings,
@@ -263,7 +263,7 @@ class ResearchEngine:
         plan = {
             "title": f"Execution Plan: {brief.query}",
             "timeline_weeks": timeline_weeks,
-            "start_date": datetime.utcnow().isoformat(),
+            "start_date": datetime.now(timezone.utc).isoformat(),
             "objectives": [],
             "initiatives": [],
             "milestones": []

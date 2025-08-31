@@ -2,7 +2,7 @@
 
 import asyncio
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 
@@ -132,7 +132,7 @@ class WebResearchPipeline:
                 'author': metadata.author if metadata else None,
                 'date': metadata.date if metadata else None,
                 'domain': domain,
-                'fetched_at': datetime.utcnow().isoformat()
+                'fetched_at': datetime.now(timezone.utc).isoformat()
             }
             
         except Exception as e:
@@ -176,7 +176,7 @@ class WebResearchPipeline:
             # Recency bonus
             try:
                 pub_date = datetime.fromisoformat(source['date'])
-                age_days = (datetime.utcnow() - pub_date).days
+                age_days = (datetime.now(timezone.utc) - pub_date).days
                 if age_days < 30:
                     score += 0.1
                 elif age_days < 180:
