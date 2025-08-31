@@ -1,0 +1,53 @@
+# Core dependencies
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# LLM and AI
+openai==1.10.0
+langchain==0.1.5
+tiktoken==0.5.2
+
+# Web scraping and research
+httpx==0.26.0
+beautifulsoup4==4.12.3
+newspaper3k==0.2.8
+readability-lxml==0.8.1
+trafilatura==1.6.3
+selenium==4.17.2
+webdriver-manager==4.0.1
+
+# Search APIs
+googlesearch-python==1.2.3
+duckduckgo-search==4.1.1
+
+# Data processing
+pandas==2.1.4
+numpy==1.26.3
+scikit-learn==1.4.0
+
+# Database and caching
+redis==5.0.1
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+
+# Task queue
+celery==5.3.6
+redis==5.0.1
+
+# Utilities
+python-dotenv==1.0.0
+python-multipart==0.0.6
+aiofiles==23.2.1
+tenacity==8.2.3
+python-dateutil==2.8.2
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+httpx==0.26.0
+
+# Monitoring
+prometheus-client==0.19.0
+structlog==24.1.0
