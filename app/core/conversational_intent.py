@@ -6,7 +6,7 @@ from enum import Enum
 from groq import AsyncGroq
 import json
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.config import settings
 
@@ -214,7 +214,7 @@ Return ONLY valid JSON:
         
         # Add message metadata
         result["original_message"] = message
-        result["timestamp"] = datetime.utcnow().isoformat()
+        result["timestamp"] = datetime.now(timezone.utc).isoformat()
         
         return result
     
@@ -324,7 +324,7 @@ class ConversationalRouter:
         if intent_result.get("action"):
             context["current_task"] = {
                 "action": intent_result["action"],
-                "started_at": datetime.utcnow().isoformat(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
                 "parameters": intent_result.get("parameters", {})
             }
     
@@ -404,7 +404,7 @@ class ConversationalFlowManager:
         if conversation_id not in self.flows:
             self.flows[conversation_id] = {
                 "conversation_id": conversation_id,
-                "started_at": datetime.utcnow().isoformat(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
                 "turn_count": 0,
                 "current_intent": None,
                 "pending_actions": [],
@@ -454,7 +454,7 @@ class ConversationalFlowManager:
         flow = self._get_or_create_flow(conversation_id)
         flow["pending_actions"].append({
             "action": action,
-            "added_at": datetime.utcnow().isoformat()
+            "added_at": datetime.now(timezone.utc).isoformat()
         })
     
     def complete_action(
@@ -471,7 +471,7 @@ class ConversationalFlowManager:
         for i, item in enumerate(pending):
             if item.get("id") == action_id:
                 completed = pending.pop(i)
-                completed["completed_at"] = datetime.utcnow().isoformat()
+                completed["completed_at"] = datetime.now(timezone.utc).isoformat()
                 completed["result"] = result
                 flow["completed_actions"].append(completed)
                 break

@@ -66,6 +66,27 @@ class MemoryManager:
             
         self.short_term_cache: Dict[str, Dict] = {}  # In-memory cache for short-term
         self.cache_ttl = timedelta(hours=24)  # Short-term memory TTL
+    
+    def _sanitize_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Sanitize metadata to ensure all values are primitive types for mem0"""
+        sanitized = {}
+        for key, value in metadata.items():
+            if value is None or isinstance(value, (str, int, float, bool)):
+                sanitized[key] = value
+            elif isinstance(value, (list, tuple)):
+                # Convert lists/tuples to comma-separated strings
+                if value:  # Non-empty list
+                    sanitized[key] = ", ".join(str(v) for v in value)
+                else:  # Empty list
+                    sanitized[key] = ""
+            elif isinstance(value, dict):
+                # Convert dicts to JSON strings
+                import json
+                sanitized[key] = json.dumps(value)
+            else:
+                # Convert other types to string
+                sanitized[key] = str(value)
+        return sanitized
         
     async def add_to_memory(
         self,
@@ -84,12 +105,15 @@ class MemoryManager:
                 "user_id": user_id or "anonymous"
             })
             
+            # Sanitize metadata for mem0
+            sanitized_meta = self._sanitize_metadata(meta)
+            
             # Add to Mem0 (long-term)
             result = await asyncio.to_thread(
                 self.memory.add,
                 content,
                 user_id=user_id or conversation_id,
-                metadata=meta
+                metadata=sanitized_meta
             )
             
             # Update short-term cache

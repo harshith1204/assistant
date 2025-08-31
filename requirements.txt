@@ -21,7 +21,7 @@ webdriver-manager
 
 # Search APIs
 googlesearch-python
-duckduckgo-search
+ddgs
 
 # Data processing
 pandas
