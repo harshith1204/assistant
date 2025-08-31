@@ -144,8 +144,8 @@ class ChatEngine:
             stream = await self.groq_client.chat.completions.create(
                 model=settings.groq_model,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=2000,
+                temperature=settings.chat_temperature,
+                max_tokens=settings.chat_max_tokens,
                 stream=True
             )
             
@@ -374,8 +374,8 @@ class ChatEngine:
             response = await self.groq_client.chat.completions.create(
                 model=settings.groq_model,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=2000
+                temperature=settings.chat_temperature,
+                max_tokens=settings.chat_max_tokens
             )
             
             # Create assistant message
@@ -504,7 +504,7 @@ Provide 3 short, specific questions that would naturally continue the conversati
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.8,
-                max_tokens=200
+                max_tokens=settings.summary_max_tokens
             )
             
             # Parse suggestions

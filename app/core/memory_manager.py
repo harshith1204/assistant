@@ -17,35 +17,69 @@ class MemoryManager:
     
     def __init__(self):
         """Initialize memory manager with Mem0"""
-        # Configure Mem0
-        config = {
-            "llm": {
-                "provider": "groq",
-                "config": {
-                    "model": "moonshotai/kimi-k2-instruct",
-                    "api_key": settings.groq_api_key,
-                    "temperature": 0.1,
-                    "max_tokens": 1000,
-                }
-            },
-            "embedder": {
-                "provider": "groq",
-                "config": {
-                    "model": "llama3-70b-8192",  # Using available Groq model for embeddings
-                    "api_key": settings.groq_api_key,
-                }
-            },
-            "vector_store": {
-                "provider": "chroma",
-                "config": {
-                    "collection_name": "chat_memories",
-                    "path": "./chroma_db",
-                }
-            },
-            "version": "v1.1"
-        }
-        
-        self.memory = Memory.from_config(config)
+        # Configure Mem0 with fallback for embedding provider
+        try:
+            config = {
+                "llm": {
+                    "provider": "groq",
+                    "config": {
+                        "model": settings.llm_model,
+                        "api_key": settings.groq_api_key,
+                        "temperature": settings.memory_temperature,
+                        "max_tokens": settings.memory_max_tokens,
+                    }
+                },
+                "embedder": {
+                    "provider": settings.memory_embedder_provider,
+                    "config": {
+                        "model": settings.memory_embedder_model,
+                    }
+                },
+                "vector_store": {
+                    "provider": "chroma",
+                    "config": {
+                        "collection_name": settings.memory_collection_name,
+                        "path": settings.memory_db_path,
+                    }
+                },
+                "version": "v1.1"
+            }
+            
+            self.memory = Memory.from_config(config)
+            logger.info("Memory manager initialized with local embeddings", provider=settings.memory_embedder_provider, model=settings.memory_embedder_model)
+            
+        except Exception as e:
+            logger.warning("Failed to initialize with local embeddings, falling back to Groq", error=str(e))
+            # Fallback to Groq embeddings
+            config = {
+                "llm": {
+                    "provider": "groq",
+                    "config": {
+                        "model": settings.llm_model,
+                        "api_key": settings.groq_api_key,
+                        "temperature": settings.memory_temperature,
+                        "max_tokens": settings.memory_max_tokens,
+                    }
+                },
+                "embedder": {
+                    "provider": "groq",
+                    "config": {
+                        "model": "llama3-70b-8192",
+                        "api_key": settings.groq_api_key,
+                    }
+                },
+                "vector_store": {
+                    "provider": "chroma",
+                    "config": {
+                        "collection_name": settings.memory_collection_name,
+                        "path": settings.memory_db_path,
+                    }
+                },
+                "version": "v1.1"
+            }
+            
+            self.memory = Memory.from_config(config)
+            logger.info("Memory manager initialized with Groq embeddings fallback")
         self.short_term_cache: Dict[str, Dict] = {}  # In-memory cache for short-term
         self.cache_ttl = timedelta(hours=24)  # Short-term memory TTL
         
