@@ -52,15 +52,15 @@ class Settings(BaseSettings):
     
     # LLM Settings
     llm_model: str = Field("moonshotai/kimi-k2-instruct", env="LLM_MODEL")
-    llm_temperature: float = Field(0.7, env="LLM_TEMPERATURE")
+    llm_temperature: float = Field(0.2, env="LLM_TEMPERATURE")
     llm_max_tokens: int = Field(4000, env="LLM_MAX_TOKENS")
     
     # LLM Settings for different use cases
-    chat_temperature: float = Field(0.7, env="CHAT_TEMPERATURE")
+    chat_temperature: float = Field(0.2, env="CHAT_TEMPERATURE")
     chat_max_tokens: int = Field(2000, env="CHAT_MAX_TOKENS")
-    synthesis_temperature: float = Field(0.7, env="SYNTHESIS_TEMPERATURE")
+    synthesis_temperature: float = Field(0.2, env="SYNTHESIS_TEMPERATURE")
     synthesis_max_tokens: int = Field(500, env="SYNTHESIS_MAX_TOKENS")
-    query_understanding_temperature: float = Field(0.7, env="QUERY_UNDERSTANDING_TEMPERATURE")
+    query_understanding_temperature: float = Field(0.2, env="QUERY_UNDERSTANDING_TEMPERATURE")
     summary_max_tokens: int = Field(200, env="SUMMARY_MAX_TOKENS")
     
     # Research Settings
@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     memory_embedder_model: str = Field("sentence-transformers/all-MiniLM-L6-v2", env="MEMORY_EMBEDDER_MODEL")
     memory_collection_name: str = Field("chat_memories", env="MEMORY_COLLECTION_NAME")
     memory_db_path: str = Field("./chroma_db", env="MEMORY_DB_PATH")
-    memory_embedder_provider: str = Field("sentence-transformers", env="MEMORY_EMBEDDER_PROVIDER")
+    memory_embedder_provider: str = Field("huggingface", env="MEMORY_EMBEDDER_PROVIDER")
     
     # Chat settings
     max_conversation_history: int = Field(100, env="MAX_CONVERSATION_HISTORY")
