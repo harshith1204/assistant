@@ -73,6 +73,17 @@ class ConnectionManager:
             
             logger.info("WebSocket disconnected", connection_id=connection_id)
     
+    def _serialize_datetime(self, obj):
+        """Recursively convert datetime objects to ISO format strings"""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {key: self._serialize_datetime(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._serialize_datetime(item) for item in obj]
+        else:
+            return obj
+    
     async def send_message(
         self,
         connection_id: str,
@@ -82,11 +93,10 @@ class ConnectionManager:
         websocket = self.active_connections.get(connection_id)
         if websocket:
             try:
-                # Convert to dict and ensure datetime is serialized
+                # Convert to dict and ensure all datetime objects are serialized
                 message_data = message.model_dump()
-                # Convert datetime to ISO format string if present
-                if 'timestamp' in message_data and isinstance(message_data['timestamp'], datetime):
-                    message_data['timestamp'] = message_data['timestamp'].isoformat()
+                # Recursively convert all datetime objects to ISO format strings
+                message_data = self._serialize_datetime(message_data)
                 await websocket.send_json(message_data)
             except Exception as e:
                 logger.error(

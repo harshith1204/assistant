@@ -128,12 +128,19 @@ class MemoryManager:
         """Search memories"""
         try:
             # Search in Mem0
-            results = await asyncio.to_thread(
+            search_result = await asyncio.to_thread(
                 self.memory.search,
                 query,
                 user_id=user_id or conversation_id,
                 limit=limit
             )
+            
+            # Extract results from the response (handles both v1.0 and v1.1 formats)
+            if isinstance(search_result, dict) and "results" in search_result:
+                results = search_result["results"]
+            else:
+                # Fallback for older format or direct list
+                results = search_result if isinstance(search_result, list) else []
             
             # Combine with short-term cache if available
             if conversation_id and conversation_id in self.short_term_cache:
@@ -173,10 +180,18 @@ class MemoryManager:
                 }
             
             # Get long-term context from Mem0
-            all_memories = await asyncio.to_thread(
+            memories_result = await asyncio.to_thread(
                 self.memory.get_all,
                 user_id=user_id or conversation_id
             )
+            
+            # Extract memories from the response (handles both v1.0 and v1.1 formats)
+            if isinstance(memories_result, dict) and "results" in memories_result:
+                all_memories = memories_result["results"]
+            elif isinstance(memories_result, list):
+                all_memories = memories_result
+            else:
+                all_memories = []
             
             if all_memories:
                 # Extract entities and topics
@@ -184,8 +199,14 @@ class MemoryManager:
                 topics = set()
                 
                 for memory in all_memories:
-                    memory_text = memory.get("memory", "")
-                    meta = memory.get("metadata", {})
+                    # Handle both dict and object formats
+                    if isinstance(memory, dict):
+                        memory_text = memory.get("memory", "")
+                        meta = memory.get("metadata", {})
+                    else:
+                        # Handle object format (if mem0 returns objects)
+                        memory_text = getattr(memory, "memory", "")
+                        meta = getattr(memory, "metadata", {})
                     
                     # Extract entities (simple approach - can be enhanced with NER)
                     if "entities" in meta:
@@ -198,7 +219,7 @@ class MemoryManager:
                 context.long_term = {
                     "total_memories": len(all_memories),
                     "memories": all_memories[:10],  # Recent 10 memories
-                    "first_interaction": all_memories[-1].get("metadata", {}).get("timestamp") if all_memories else None
+                    "first_interaction": self._get_memory_timestamp(all_memories[-1]) if all_memories else None
                 }
                 
                 context.entities = list(entities)
@@ -327,13 +348,31 @@ class MemoryManager:
         except Exception as e:
             logger.error("Failed to cleanup cache", error=str(e))
     
+    def _get_memory_timestamp(self, memory) -> Optional[str]:
+        """Extract timestamp from a memory object or dict"""
+        if isinstance(memory, dict):
+            metadata = memory.get("metadata", {})
+            return metadata.get("timestamp") if metadata else None
+        else:
+            # Handle object format
+            metadata = getattr(memory, "metadata", {})
+            return metadata.get("timestamp") if metadata else None
+    
     async def get_memory_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Get memory statistics"""
         try:
-            all_memories = await asyncio.to_thread(
+            memories_result = await asyncio.to_thread(
                 self.memory.get_all,
                 user_id=user_id or "global"
             )
+            
+            # Extract memories from the response
+            if isinstance(memories_result, dict) and "results" in memories_result:
+                all_memories = memories_result["results"]
+            elif isinstance(memories_result, list):
+                all_memories = memories_result
+            else:
+                all_memories = []
             
             return {
                 "total_memories": len(all_memories),
@@ -342,8 +381,8 @@ class MemoryManager:
                     len(cache.get("messages", []))
                     for cache in self.short_term_cache.values()
                 ),
-                "oldest_memory": all_memories[-1].get("metadata", {}).get("timestamp") if all_memories else None,
-                "newest_memory": all_memories[0].get("metadata", {}).get("timestamp") if all_memories else None
+                "oldest_memory": self._get_memory_timestamp(all_memories[-1]) if all_memories else None,
+                "newest_memory": self._get_memory_timestamp(all_memories[0]) if all_memories else None
             }
             
         except Exception as e:
