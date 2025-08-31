@@ -12,6 +12,7 @@ from app.chat_models import (
     StreamChunk, MessageRole, MessageType
 )
 from app.core.chat_engine import ChatEngine
+from app.core.enhanced_chat_engine import EnhancedChatEngine
 
 logger = structlog.get_logger()
 
@@ -23,6 +24,7 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         self.user_connections: Dict[str, Set[str]] = {}  # user_id -> connection_ids
         self.chat_engine = ChatEngine()
+        self.enhanced_engine = EnhancedChatEngine()  # Enhanced conversational engine
     
     async def connect(
         self,
@@ -136,7 +138,14 @@ class ConnectionManager:
                 )
             )
             
-            if request.stream:
+            # Use enhanced conversational engine if enabled
+            if data.get("conversational", True):
+                await self.handle_conversational_message(
+                    connection_id,
+                    request,
+                    user_id
+                )
+            elif request.stream:
                 # Stream response
                 await self.stream_response(
                     connection_id,
@@ -232,6 +241,51 @@ class ConnectionManager:
                 connection_id,
                 WebSocketMessage(
                     type="stream_error",
+                    data={"error": str(e)}
+                )
+            )
+    
+    async def handle_conversational_message(
+        self,
+        connection_id: str,
+        request: ChatRequest,
+        user_id: Optional[str] = None
+    ):
+        """Handle conversational message with enhanced flow"""
+        try:
+            # Process through enhanced engine
+            async for update in self.enhanced_engine.process_conversational_message(
+                request,
+                user_id
+            ):
+                # Send each update to the client
+                await self.send_message(
+                    connection_id,
+                    WebSocketMessage(
+                        type="conversational_update",
+                        data=update
+                    )
+                )
+                
+                # Handle special update types
+                if update.get("type") == "clarification_needed":
+                    # Store that we're waiting for clarification
+                    self.active_connections[connection_id].waiting_for = "clarification"
+                    
+                elif update.get("type") == "confirmation_needed":
+                    # Store that we're waiting for confirmation
+                    self.active_connections[connection_id].waiting_for = "confirmation"
+                    
+        except Exception as e:
+            logger.error(
+                "Failed to handle conversational message",
+                connection_id=connection_id,
+                error=str(e)
+            )
+            await self.send_message(
+                connection_id,
+                WebSocketMessage(
+                    type="conversational_error",
                     data={"error": str(e)}
                 )
             )
