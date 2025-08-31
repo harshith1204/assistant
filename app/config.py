@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     memory_embedder_model: str = Field("sentence-transformers/all-MiniLM-L6-v2", env="MEMORY_EMBEDDER_MODEL")
     memory_collection_name: str = Field("chat_memories", env="MEMORY_COLLECTION_NAME")
     memory_db_path: str = Field("./chroma_db", env="MEMORY_DB_PATH")
-    memory_embedder_provider: str = Field("sentence-transformers", env="MEMORY_EMBEDDER_PROVIDER")
+    memory_embedder_provider: str = Field("huggingface", env="MEMORY_EMBEDDER_PROVIDER")
     
     # Chat settings
     max_conversation_history: int = Field(100, env="MAX_CONVERSATION_HISTORY")
