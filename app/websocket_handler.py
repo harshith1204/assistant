@@ -3,7 +3,7 @@
 import json
 import asyncio
 from typing import Dict, Set, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import WebSocket, WebSocketDisconnect
 import structlog
 
@@ -53,7 +53,7 @@ class ConnectionManager:
                 data={
                     "connection_id": connection_id,
                     "message": "Connected to chat service",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
             )
         )
@@ -82,7 +82,12 @@ class ConnectionManager:
         websocket = self.active_connections.get(connection_id)
         if websocket:
             try:
-                await websocket.send_json(message.dict())
+                # Convert to dict and ensure datetime is serialized
+                message_data = message.model_dump()
+                # Convert datetime to ISO format string if present
+                if 'timestamp' in message_data and isinstance(message_data['timestamp'], datetime):
+                    message_data['timestamp'] = message_data['timestamp'].isoformat()
+                await websocket.send_json(message_data)
             except Exception as e:
                 logger.error(
                     "Failed to send message",
@@ -139,7 +144,7 @@ class ConnectionManager:
                     connection_id,
                     WebSocketMessage(
                         type="message",
-                        data=response.dict()
+                        data=response.model_dump()
                     )
                 )
                 
@@ -191,7 +196,7 @@ class ConnectionManager:
                     connection_id,
                     WebSocketMessage(
                         type="stream_chunk",
-                        data=stream_chunk.dict()
+                        data=stream_chunk.model_dump()
                     )
                 )
             
@@ -256,7 +261,7 @@ class ConnectionManager:
                 connection_id,
                 WebSocketMessage(
                     type="research_complete",
-                    data=response.dict()
+                    data=response.model_dump()
                 )
             )
             
@@ -343,7 +348,7 @@ class ConnectionManager:
                         data={
                             "conversation_id": conversation_id,
                             "messages": messages,
-                            "context": conversation.context.dict()
+                            "context": conversation.context.model_dump()
                         }
                     )
                 )

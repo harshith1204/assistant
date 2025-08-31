@@ -2,7 +2,7 @@
 
 import json
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import httpx
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -332,7 +332,7 @@ Risks: {', '.join(idea.get('risks', []))}
         
         sections = [
             f"**Research Query:** {brief.get('query', 'N/A')}",
-            f"**Date:** {brief.get('date', datetime.utcnow().isoformat())}",
+            f"**Date:** {brief.get('date', datetime.now(timezone.utc).isoformat())}",
             f"**Executive Summary:**\n{brief.get('executive_summary', 'N/A')}",
             "\n**Key Findings:**"
         ]
