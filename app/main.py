@@ -5,9 +5,10 @@ from typing import Dict, Any, Optional
 import asyncio
 import uuid
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import structlog
 import uvicorn
 
@@ -16,7 +17,13 @@ from app.models import (
     ResearchRequest, ResearchBrief, SaveRequest, PlanRequest,
     ResearchStatus, SubscriptionRequest
 )
+from app.chat_models import (
+    ChatRequest, ChatResponse, ConversationSummary,
+    MemoryUpdate
+)
 from app.core.research_engine import ResearchEngine
+from app.core.chat_engine import ChatEngine
+from app.websocket_handler import websocket_endpoint
 
 # Configure logging
 structlog.configure(
@@ -40,6 +47,7 @@ logger = structlog.get_logger()
 # Store research briefs in memory (use Redis/DB in production)
 research_store: Dict[str, ResearchBrief] = {}
 research_engines: Dict[str, ResearchEngine] = {}
+chat_engine = ChatEngine()  # Global chat engine instance
 
 
 @asynccontextmanager
@@ -344,6 +352,180 @@ async def global_exception_handler(request, exc):
         status_code=500,
         content={"detail": "Internal server error", "error": str(exc)}
     )
+
+
+# Chat API Endpoints
+@app.post("/chat/message", response_model=ChatResponse)
+async def send_chat_message(request: ChatRequest) -> ChatResponse:
+    """Send a chat message and get response"""
+    try:
+        response = await chat_engine.process_message(request)
+        return response
+    except Exception as e:
+        logger.error("Chat message failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+
+@app.get("/chat/conversations")
+async def list_conversations(
+    user_id: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0)
+) -> Dict[str, Any]:
+    """List all conversations"""
+    try:
+        conversations = await chat_engine.list_conversations(user_id)
+        
+        # Paginate
+        total = len(conversations)
+        paginated = conversations[offset:offset + limit]
+        
+        summaries = []
+        for conv in paginated:
+            summaries.append(ConversationSummary(
+                conversation_id=conv.conversation_id,
+                title=conv.title,
+                created_at=conv.created_at,
+                updated_at=conv.updated_at,
+                message_count=conv.get_message_count(),
+                last_message=conv.messages[-1].content[:100] if conv.messages else None,
+                topics=conv.context.topics,
+                status=conv.status
+            ))
+        
+        return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "conversations": [s.dict() for s in summaries]
+        }
+    except Exception as e:
+        logger.error("Failed to list conversations", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chat/conversation/{conversation_id}")
+async def get_conversation(conversation_id: str) -> Dict[str, Any]:
+    """Get a specific conversation"""
+    try:
+        conversation = await chat_engine.get_conversation(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        return {
+            "conversation_id": conversation.conversation_id,
+            "title": conversation.title,
+            "created_at": conversation.created_at.isoformat(),
+            "updated_at": conversation.updated_at.isoformat(),
+            "messages": [
+                {
+                    "message_id": msg.message_id,
+                    "role": msg.role.value,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp.isoformat(),
+                    "type": msg.message_type.value,
+                    "metadata": msg.metadata
+                }
+                for msg in conversation.messages
+            ],
+            "context": conversation.context.dict(),
+            "status": conversation.status
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get conversation", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/chat/conversation/{conversation_id}")
+async def delete_conversation(conversation_id: str) -> Dict[str, str]:
+    """Delete a conversation"""
+    try:
+        success = await chat_engine.delete_conversation(conversation_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        return {"message": "Conversation deleted", "conversation_id": conversation_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete conversation", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/memory/update")
+async def update_memory(update: MemoryUpdate) -> Dict[str, Any]:
+    """Update conversation memory"""
+    try:
+        memory_manager = chat_engine.memory_manager
+        
+        if update.operation == "add":
+            result = await memory_manager.add_to_memory(
+                conversation_id=update.conversation_id,
+                content=f"{update.key}: {update.value}",
+                metadata={"type": update.memory_type}
+            )
+        elif update.operation == "delete":
+            await memory_manager.clear_short_term_memory(update.conversation_id)
+            result = {"success": True}
+        else:
+            result = {"success": False, "error": "Unsupported operation"}
+        
+        return result
+    except Exception as e:
+        logger.error("Failed to update memory", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chat/memory/stats")
+async def get_memory_stats(user_id: Optional[str] = Query(None)) -> Dict[str, Any]:
+    """Get memory statistics"""
+    try:
+        stats = await chat_engine.memory_manager.get_memory_stats(user_id)
+        return stats
+    except Exception as e:
+        logger.error("Failed to get memory stats", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# WebSocket endpoint
+@app.websocket("/ws/chat/{connection_id}")
+async def websocket_chat(
+    websocket: WebSocket,
+    connection_id: str,
+    user_id: Optional[str] = Query(None)
+):
+    """WebSocket endpoint for real-time chat"""
+    await websocket_endpoint(websocket, connection_id, user_id)
+
+
+# Serve chat UI
+@app.get("/chat", response_class=HTMLResponse)
+async def chat_ui():
+    """Serve the chat UI"""
+    try:
+        with open("static/chat.html", "r") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(content=get_default_chat_html())
+
+
+def get_default_chat_html():
+    """Get default chat HTML if file not found"""
+    return """<!DOCTYPE html>
+<html>
+<head>
+    <title>Chat Interface</title>
+    <style>body { font-family: Arial; } .container { max-width: 800px; margin: 0 auto; padding: 20px; }</style>
+</head>
+<body>
+    <div class="container">
+        <h1>Chat Interface</h1>
+        <p>Chat interface file not found. Please create static/chat.html</p>
+    </div>
+</body>
+</html>"""
 
 
 if __name__ == "__main__":

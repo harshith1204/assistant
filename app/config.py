@@ -59,6 +59,27 @@ class Settings(BaseSettings):
     recency_months: int = Field(12, env="RECENCY_MONTHS")
     cache_ttl_seconds: int = Field(3600, env="CACHE_TTL_SECONDS")
     
+    # WebSocket settings
+    websocket_ping_interval: int = Field(30, env="WEBSOCKET_PING_INTERVAL")
+    websocket_ping_timeout: int = Field(10, env="WEBSOCKET_PING_TIMEOUT")
+    
+    # Memory settings
+    memory_ttl_hours: int = Field(24, env="MEMORY_TTL_HOURS")
+    max_memory_items: int = Field(1000, env="MAX_MEMORY_ITEMS")
+    
+    # Chat settings
+    max_conversation_history: int = Field(100, env="MAX_CONVERSATION_HISTORY")
+    default_context_window: int = Field(10, env="DEFAULT_CONTEXT_WINDOW")
+    
+    # Session settings
+    secret_key: str = Field("your-secret-key-change-this-in-production", env="SECRET_KEY")
+    session_expire_minutes: int = Field(1440, env="SESSION_EXPIRE_MINUTES")  # 24 hours
+    
+    # Groq model alias for compatibility
+    @property
+    def groq_model(self) -> str:
+        return self.llm_model
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
