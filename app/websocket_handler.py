@@ -32,14 +32,24 @@ class ConnectionManager:
         connection_id: str,
         user_id: Optional[str] = None
     ):
-        """Accept and register a new connection"""
+        """Accept and register a new connection with dual context"""
         await websocket.accept()
         self.active_connections[connection_id] = websocket
         
+        # Always track user connections for dual context
         if user_id:
             if user_id not in self.user_connections:
                 self.user_connections[user_id] = set()
             self.user_connections[user_id].add(connection_id)
+            
+            # Send user_id back to client for session persistence
+            await self.send_message(
+                connection_id,
+                WebSocketMessage(
+                    type="session_info",
+                    data={"user_id": user_id, "connection_id": connection_id}
+                )
+            )
         
         logger.info(
             "WebSocket connected",
@@ -124,8 +134,14 @@ class ConnectionManager:
         data: Dict,
         user_id: Optional[str] = None
     ):
-        """Handle incoming chat message"""
+        """Handle incoming chat message with dual context"""
         try:
+            # Ensure user_id for dual context
+            if not user_id:
+                import uuid
+                user_id = f"anon_{uuid.uuid4().hex[:12]}"
+                logger.info("Generated anonymous user_id for chat", user_id=user_id)
+            
             # Parse request
             request = ChatRequest(**data)
             

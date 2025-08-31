@@ -234,7 +234,7 @@ class WebResearchPipeline:
         }
         
         for source in sources:
-            content_lower = (source.get('content', '') + source.get('title', '')).lower()
+            content_lower = (source.get('content', '') + (source.get('title') or '')).lower()
             
             assigned = False
             for topic, keywords in topic_keywords.items():
