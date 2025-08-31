@@ -24,7 +24,6 @@ from app.chat_models import (
 from app.core.research_engine import ResearchEngine
 from app.core.chat_engine import ChatEngine
 from app.websocket_handler import websocket_endpoint
-from app.core.enhanced_chat_engine import EnhancedChatEngine
 
 # Configure logging
 structlog.configure(
@@ -49,7 +48,6 @@ logger = structlog.get_logger()
 research_store: Dict[str, ResearchBrief] = {}
 research_engines: Dict[str, ResearchEngine] = {}
 chat_engine = ChatEngine()  # Global chat engine instance
-enhanced_engine = EnhancedChatEngine()  # Enhanced conversational engine
 
 
 @asynccontextmanager
