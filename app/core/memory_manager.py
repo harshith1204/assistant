@@ -96,51 +96,61 @@ class MemoryManager:
         user_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Add information to memory"""
+        # Prepare metadata
+        meta = metadata or {}
+        meta.update({
+            "conversation_id": conversation_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "user_id": user_id or "anonymous"
+        })
+        
+        # Always update short-term cache (in-memory) first
+        if conversation_id not in self.short_term_cache:
+            self.short_term_cache[conversation_id] = {
+                "messages": [],
+                "context": {},
+                "timestamp": datetime.now(timezone.utc)
+            }
+        
+        self.short_term_cache[conversation_id]["messages"].append({
+            "content": content,
+            "metadata": meta,
+            "timestamp": datetime.now(timezone.utc)
+        })
+        
+        # Try to add to long-term memory (Mem0)
+        mem0_result = None
+        mem0_error = None
         try:
-            # Prepare metadata
-            meta = metadata or {}
-            meta.update({
-                "conversation_id": conversation_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "user_id": user_id or "anonymous"
-            })
-            
             # Sanitize metadata for mem0
             sanitized_meta = self._sanitize_metadata(meta)
             
             # Add to Mem0 (long-term)
-            result = await asyncio.to_thread(
+            mem0_result = await asyncio.to_thread(
                 self.memory.add,
                 content,
                 user_id=user_id or conversation_id,
                 metadata=sanitized_meta
             )
             
-            # Update short-term cache
-            if conversation_id not in self.short_term_cache:
-                self.short_term_cache[conversation_id] = {
-                    "messages": [],
-                    "context": {},
-                    "timestamp": datetime.now(timezone.utc)
-                }
-            
-            self.short_term_cache[conversation_id]["messages"].append({
-                "content": content,
-                "metadata": meta,
-                "timestamp": datetime.now(timezone.utc)
-            })
-            
             logger.info(
-                "Added to memory",
+                "Added to long-term memory",
                 conversation_id=conversation_id,
-                memory_id=result.get("id") if isinstance(result, dict) else None
+                memory_id=mem0_result.get("id") if isinstance(mem0_result, dict) else None
             )
             
-            return {"success": True, "memory_id": result}
-            
         except Exception as e:
-            logger.error("Failed to add to memory", error=str(e))
-            return {"success": False, "error": str(e)}
+            mem0_error = str(e)
+            logger.warning("Failed to add to long-term memory (Mem0), but short-term cache updated", error=mem0_error)
+        
+        # Return success if at least short-term cache was updated
+        return {
+            "success": True,
+            "memory_id": mem0_result,
+            "short_term_cached": True,
+            "long_term_stored": mem0_result is not None,
+            "warning": mem0_error if mem0_error else None
+        }
     
     async def search_memory(
         self,
