@@ -1,0 +1,101 @@
+openapi: 3.0.3
+info:
+  title: Research Service
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /research/run:
+    post:
+      summary: Run research pipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                scope:
+                  type: array
+                  items: { type: string }
+                geo:
+                  type: array
+                  items: { type: string }
+                freshness:
+                  oneOf:
+                    - type: string
+                    - type: object
+                      properties:
+                        months:
+                          type: integer
+      responses:
+        200:
+          description: OK
+  /research/save:
+    post:
+      summary: Save brief to CRM/PMS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                briefId: { type: string, format: uuid }
+                crmRef:
+                  type: object
+                  additionalProperties: true
+                pmsRef:
+                  type: object
+                  additionalProperties: true
+                attachments:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type: { type: string, enum: [pdf, screenshot, other] }
+                      url: { type: string }
+                      name: { type: string }
+      responses:
+        200:
+          description: OK
+  /research/ideas-to-plan:
+    post:
+      summary: Convert ideas to PlanJSON
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                briefId: { type: string, format: uuid }
+                selections:
+                  type: array
+                  items: { type: integer }
+      responses:
+        200:
+          description: OK
+  /research/subscribe:
+    post:
+      summary: Subscribe to periodic re-runs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query: { type: string }
+                cadence: { type: string, enum: [weekly, monthly] }
+                geo:
+                  type: array
+                  items: { type: string }
+                scope:
+                  type: array
+                  items: { type: string }
+      responses:
+        200:
+          description: OK
