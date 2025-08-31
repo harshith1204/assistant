@@ -2,6 +2,7 @@
 
 import json
 import asyncio
+import uuid
 from typing import Dict, Any, List, Optional, AsyncGenerator
 from datetime import datetime
 from groq import AsyncGroq
@@ -34,11 +35,18 @@ class ChatEngine:
         request: ChatRequest,
         user_id: Optional[str] = None
     ) -> ChatResponse:
-        """Process a chat message"""
+        """Process a chat message with dual context"""
         try:
-            # Get or create conversation
+            # Ensure we have both IDs for dual context
+            conversation_id = request.conversation_id or str(uuid.uuid4())
+            conversation_id, user_id = self.memory_manager.ensure_dual_context(
+                conversation_id,
+                user_id
+            )
+            
+            # Get or create conversation with both IDs
             conversation = await self._get_or_create_conversation(
-                request.conversation_id,
+                conversation_id,
                 user_id
             )
             
@@ -233,15 +241,21 @@ class ChatEngine:
             for msg in recent_messages
         ]
         
-        # Add memory search results if using long-term memory
+        # Search both user and conversation memories if enabled
         if request.use_long_term_memory:
+            # Search both user-level and conversation-level memories
             memories = await self.memory_manager.search_memory(
                 request.message,
                 conversation.conversation_id,
                 user_id,
-                limit=5
+                limit=5,
+                search_scope="both"  # Search both contexts
             )
             context["relevant_memories"] = memories
+            
+            # Separate memories by level for better context
+            context["user_memories"] = [m for m in memories if m.get("memory_level") == "user"]
+            context["conversation_memories"] = [m for m in memories if m.get("memory_level") == "conversation"]
         
         # Add conversation metadata
         context["conversation_metadata"] = {

@@ -218,7 +218,7 @@ export const apiService = new ApiService();
 export class WebSocketService {
   private ws: WebSocket | null = null;
   private connectionId: string;
-  private userId?: string;
+  private userId: string;
   private messageHandlers: Map<string, (data: any) => void> = new Map();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
@@ -226,7 +226,31 @@ export class WebSocketService {
 
   constructor(userId?: string) {
     this.connectionId = this.generateConnectionId();
-    this.userId = userId;
+    // Ensure we always have a user_id for dual context
+    this.userId = this.getOrCreateUserId(userId);
+  }
+
+  /**
+   * Get or create a persistent user ID
+   */
+  private getOrCreateUserId(providedUserId?: string): string {
+    if (providedUserId) {
+      // Store provided user ID for persistence
+      localStorage.setItem('userId', providedUserId);
+      return providedUserId;
+    }
+
+    // Check localStorage for existing user ID
+    const storedUserId = localStorage.getItem('userId');
+    if (storedUserId) {
+      return storedUserId;
+    }
+
+    // Generate anonymous user ID
+    const anonUserId = `anon_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    localStorage.setItem('userId', anonUserId);
+    console.log('Generated anonymous user ID:', anonUserId);
+    return anonUserId;
   }
 
   private generateConnectionId(): string {
@@ -234,11 +258,12 @@ export class WebSocketService {
   }
 
   /**
-   * Connect to WebSocket
+   * Connect to WebSocket with dual context support
    */
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const wsUrl = `${WS_BASE_URL}/ws/chat/${this.connectionId}${this.userId ? `?user_id=${this.userId}` : ''}`;
+      // Always include user_id for dual context
+      const wsUrl = `${WS_BASE_URL}/ws/chat/${this.connectionId}?user_id=${this.userId}`;
       
       try {
         this.ws = new WebSocket(wsUrl);
@@ -279,6 +304,17 @@ export class WebSocketService {
    */
   private handleMessage(message: any) {
     const { type, data } = message;
+    
+    // Handle session info to update user_id if needed
+    if (type === 'session_info') {
+      const { user_id } = data;
+      if (user_id && user_id !== this.userId) {
+        this.userId = user_id;
+        localStorage.setItem('userId', user_id);
+        console.log('Updated user ID from server:', user_id);
+      }
+    }
+    
     const handler = this.messageHandlers.get(type);
     
     if (handler) {
@@ -328,15 +364,27 @@ export class WebSocketService {
   }
 
   /**
-   * Send chat message
+   * Send chat message with dual context
    */
   sendChatMessage(message: string, conversationId?: string, stream = true) {
+    // Ensure conversation_id is provided for dual context
+    const finalConversationId = conversationId || this.generateNewConversationId();
+    
     this.send('chat', {
       message,
-      conversation_id: conversationId,
+      conversation_id: finalConversationId,
       stream,
       user_id: this.userId,
     });
+    
+    return finalConversationId;  // Return for UI to track
+  }
+  
+  /**
+   * Generate a new conversation ID
+   */
+  private generateNewConversationId(): string {
+    return `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 
   /**
