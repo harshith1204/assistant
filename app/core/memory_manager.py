@@ -22,7 +22,7 @@ class MemoryManager:
             "llm": {
                 "provider": "groq",
                 "config": {
-                    "model": "mixtral-8x7b-32768",
+                    "model": "moonshotai/kimi-k2-instruct",
                     "api_key": settings.groq_api_key,
                     "temperature": 0.1,
                     "max_tokens": 1000,
