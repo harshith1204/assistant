@@ -16,7 +16,7 @@ from app.chat_models import (
 from app.models import ResearchRequest, ResearchBrief
 from app.core.memory_manager import MemoryManager
 from app.core.research_engine import ResearchEngine
-from app.core.conversational_intent import (
+from app.core.intent import (
     ConversationalFlowManager, ConversationalIntent, ActionType
 )
 from app.integrations.crm_client import CRMClient
