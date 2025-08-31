@@ -35,6 +35,8 @@ interface ConversationalUpdate {
   confidence?: number;
   preview?: any;
   actions?: Array<{ label: string; value: string }>;
+  questions?: string[];
+  topics?: string[];
   waiting_for_response?: boolean;
   metadata?: any;
   step?: number;
@@ -55,6 +57,10 @@ interface Message {
   status?: 'sending' | 'sent' | 'error';
   intent?: string;
   confidence?: number;
+  questions?: string[];
+  preview?: any;
+  actions?: Array<{ label: string; value: string }>;
+  briefId?: string;
 }
 
 export const ConversationalChat: React.FC = () => {
@@ -324,7 +330,7 @@ export const ConversationalChat: React.FC = () => {
         </div>
       </CardHeader>
 
-      <CardContent className="flex-1 flex flex-col p-0">
+      <CardContent className="flex-1 flex flex-col p-0 min-h-0">
         <ScrollArea className="flex-1 p-4">
           <div className="space-y-4">
             {messages.map((message) => (
@@ -341,7 +347,7 @@ export const ConversationalChat: React.FC = () => {
                       : message.role === 'system'
                       ? 'bg-muted'
                       : 'bg-secondary'
-                  } rounded-lg p-3`}
+                  } rounded-lg p-3 overflow-hidden`}
                 >
                   <div className="flex items-start gap-2">
                     {message.role === 'assistant' && <Bot className="w-4 h-4 mt-1" />}
@@ -357,7 +363,7 @@ export const ConversationalChat: React.FC = () => {
                         </div>
                       )}
                       
-                      <div className="whitespace-pre-wrap">{message.content}</div>
+                      <div className="whitespace-pre-wrap break-words">{message.content}</div>
                       
                       {message.questions && (
                         <div className="mt-3 space-y-2">
