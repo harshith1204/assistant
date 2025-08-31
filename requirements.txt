@@ -5,7 +5,7 @@ pydantic==2.5.3
 pydantic-settings==2.1.0
 
 # LLM and AI
-openai==1.10.0
+groq==0.4.2
 langchain==0.1.5
 tiktoken==0.5.2
 

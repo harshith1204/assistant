@@ -3,7 +3,7 @@
 import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from openai import AsyncOpenAI
+from groq import AsyncGroq
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -17,7 +17,7 @@ class ResearchSynthesizer:
     """Synthesize research findings and generate insights"""
     
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self.client = AsyncGroq(api_key=settings.groq_api_key)
         self.model = settings.llm_model
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
@@ -92,7 +92,7 @@ Content: {content_snippet}...
         
         IMPORTANT: Every claim must be supported by the provided sources.
         
-        Return as JSON:
+        Return ONLY valid JSON (no additional text):
         {
             "title": "...",
             "summary": "...",
@@ -118,8 +118,7 @@ Create a finding for this topic based on the sources."""
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.3,
-                response_format={"type": "json_object"}
+                temperature=0.3
             )
             
             result = json.loads(response.choices[0].message.content)
@@ -174,7 +173,7 @@ Create a finding for this topic based on the sources."""
         - Confidence: 0-1 (probability of success)
         - Effort: Person-days required (integer)
         
-        Return as JSON:
+        Return ONLY valid JSON (no additional text):
         {
             "ideas": [
                 {
@@ -213,8 +212,7 @@ Generate actionable ideas based on these findings."""
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.7,
-                response_format={"type": "json_object"}
+                temperature=0.7
             )
             
             result = json.loads(response.choices[0].message.content)

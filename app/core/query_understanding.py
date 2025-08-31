@@ -2,7 +2,7 @@
 
 import json
 from typing import List, Dict, Any, Optional
-from openai import AsyncOpenAI
+from groq import AsyncGroq
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -16,7 +16,7 @@ class QueryUnderstanding:
     """Parse and expand research queries using LLM"""
     
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self.client = AsyncGroq(api_key=settings.groq_api_key)
         self.model = settings.llm_model
         
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
@@ -31,7 +31,7 @@ class QueryUnderstanding:
         5. Specific constraints or requirements
         6. Research scope (market, competitors, pricing, channels, compliance, technology, customer)
         
-        Return as JSON with these fields:
+        Return ONLY valid JSON with these fields:
         {
             "industry": "...",
             "geography": "...",
@@ -41,7 +41,9 @@ class QueryUnderstanding:
             "scope": [...],
             "entities": [...],
             "key_terms": [...]
-        }"""
+        }
+        
+        Important: Return ONLY the JSON object, no additional text."""
         
         try:
             response = await self.client.chat.completions.create(
@@ -50,8 +52,7 @@ class QueryUnderstanding:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Parse this research query: {query}"}
                 ],
-                temperature=0.3,
-                response_format={"type": "json_object"}
+                temperature=0.3
             )
             
             parsed = json.loads(response.choices[0].message.content)
@@ -92,7 +93,8 @@ class QueryUnderstanding:
         - Technology trends
         - Success factors and risks
         
-        Return as JSON: {"subqueries": ["query1", "query2", ...]}"""
+        Return ONLY valid JSON: {"subqueries": ["query1", "query2", ...]}
+        No additional text, just the JSON object."""
         
         context = f"""
         Main query: {query}
@@ -110,8 +112,7 @@ class QueryUnderstanding:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": context}
                 ],
-                temperature=0.7,
-                response_format={"type": "json_object"}
+                temperature=0.7
             )
             
             result = json.loads(response.choices[0].message.content)

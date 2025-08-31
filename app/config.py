@@ -9,8 +9,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
     
     # API Keys
-    openai_api_key: str = Field(..., env="OPENAI_API_KEY")
-    anthropic_api_key: Optional[str] = Field(None, env="ANTHROPIC_API_KEY")
+    groq_api_key: str = Field(..., env="GROQ_API_KEY")
     
     # CRM Configuration
     crm_base_url: str = Field("https://stage-api.simpo.ai/crm", env="CRM_BASE_URL")
@@ -50,7 +49,7 @@ class Settings(BaseSettings):
     rate_limit_period: int = Field(3600, env="RATE_LIMIT_PERIOD")
     
     # LLM Settings
-    llm_model: str = Field("gpt-4-turbo-preview", env="LLM_MODEL")
+    llm_model: str = Field("mixtral-8x7b-32768", env="LLM_MODEL")
     llm_temperature: float = Field(0.7, env="LLM_TEMPERATURE")
     llm_max_tokens: int = Field(4000, env="LLM_MAX_TOKENS")
     

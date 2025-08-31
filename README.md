@@ -2,6 +2,8 @@
 
 A production-ready Python backend for AI-powered research and brainstorming with CRM/PMS integration. This system turns fuzzy prompts into structured research briefs with citations, actionable ideas, and execution plans.
 
+**Powered by Groq Cloud** for lightning-fast LLM inference (10-100x faster than traditional APIs).
+
 ## 🚀 Features
 
 ### Core Capabilities
@@ -24,7 +26,7 @@ A production-ready Python backend for AI-powered research and brainstorming with
 ## 📋 Prerequisites
 
 - Python 3.9+
-- OpenAI API key (for LLM operations)
+- Groq Cloud API key (for fast LLM inference)
 - Optional: CRM/PMS API credentials
 - Optional: Redis for caching (production)
 - Optional: PostgreSQL for persistence (production)
@@ -51,7 +53,8 @@ pip install -r requirements.txt
 4. **Configure environment**
 ```bash
 cp .env.example .env
-# Edit .env with your API keys and configuration
+# Edit .env with your Groq API key and configuration
+# Get your Groq API key from: https://console.groq.com/keys
 ```
 
 5. **Run the application**
@@ -65,7 +68,7 @@ Key environment variables in `.env`:
 
 ```env
 # Required
-OPENAI_API_KEY=your_openai_api_key
+GROQ_API_KEY=your_groq_api_key
 
 # CRM Integration (optional)
 CRM_BASE_URL=https://your-crm-api.com
@@ -79,7 +82,7 @@ PMS_AUTH_TOKEN=your_pms_token
 MAX_SOURCES_PER_QUERY=20
 CREDIBILITY_THRESHOLD=0.6
 RECENCY_MONTHS=12
-LLM_MODEL=gpt-4-turbo-preview
+LLM_MODEL=mixtral-8x7b-32768  # Or llama2-70b-4096
 ```
 
 ## 📡 API Endpoints
@@ -286,6 +289,7 @@ For issues and questions:
 - Create an issue in the repository
 - Check the example usage script
 - Review the API documentation at `/docs` (FastAPI automatic docs)
+- See `GROQ_MODELS.md` for model selection guide
 
 ## 🔮 Future Enhancements
 

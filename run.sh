@@ -30,10 +30,11 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
-# Check for OpenAI API key
-if ! grep -q "OPENAI_API_KEY=sk-" .env; then
-    echo "WARNING: OpenAI API key not configured in .env"
-    echo "Please add your OpenAI API key to continue."
+# Check for Groq API key
+if ! grep -q "GROQ_API_KEY=gsk_" .env; then
+    echo "WARNING: Groq API key not configured in .env"
+    echo "Please add your Groq API key to continue."
+    echo "Get your key from: https://console.groq.com/keys"
     exit 1
 fi
 
