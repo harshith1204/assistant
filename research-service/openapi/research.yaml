@@ -1,0 +1,200 @@
+openapi: 3.0.3
+info:
+  title: Research Service
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /research/run:
+    post:
+      summary: Run research pipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                scope:
+                  type: array
+                  items: { type: string }
+                geo:
+                  type: array
+                  items: { type: string }
+                freshness:
+                  oneOf:
+                    - type: string
+                    - type: object
+                      properties:
+                        months:
+                          type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResearchBrief'
+  /research/save:
+    post:
+      summary: Save brief to CRM/PMS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                briefId: { type: string, format: uuid }
+                crmRef:
+                  type: object
+                  properties:
+                    leadId: { type: string, format: uuid }
+                    taskId: { type: string, format: uuid }
+                pmsRef:
+                  type: object
+                  properties:
+                    projectId: { type: string }
+                    pageId: { type: string }
+                attachments:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type: { type: string, enum: [pdf, screenshot, other] }
+                      url: { type: string }
+                      name: { type: string }
+      responses:
+        '200':
+          description: OK
+  /research/ideas-to-plan:
+    post:
+      summary: Convert ideas to PlanJSON
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                briefId: { type: string, format: uuid }
+                selections:
+                  type: array
+                  items: { type: integer }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanJSON'
+  /research/subscribe:
+    post:
+      summary: Subscribe to periodic re-runs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query: { type: string }
+                cadence: { type: string, enum: [weekly, monthly] }
+                geo:
+                  type: array
+                  items: { type: string }
+                scope:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: OK
+components:
+  schemas:
+    Evidence:
+      type: object
+      properties:
+        quote: { type: string }
+        url: { type: string }
+        published: { type: string }
+    Finding:
+      type: object
+      properties:
+        title: { type: string }
+        summary: { type: string }
+        evidence:
+          type: array
+          items: { $ref: '#/components/schemas/Evidence' }
+        confidence: { type: number }
+        recency: { type: string }
+    RICE:
+      type: object
+      properties:
+        reach: { type: integer }
+        impact: { type: number }
+        confidence: { type: number }
+        effort: { type: number }
+    Idea:
+      type: object
+      properties:
+        idea: { type: string }
+        RICE: { $ref: '#/components/schemas/RICE' }
+    ResearchBrief:
+      type: object
+      properties:
+        briefId: { type: string }
+        query: { type: string }
+        date: { type: string }
+        entities:
+          type: array
+          items: { type: string }
+        keyQuestions:
+          type: array
+          items: { type: string }
+        findings:
+          type: array
+          items: { $ref: '#/components/schemas/Finding' }
+        ideas:
+          type: array
+          items: { $ref: '#/components/schemas/Idea' }
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string }
+              path: { type: string }
+        summary: { type: string }
+    PlanJSON:
+      type: object
+      properties:
+        okrs:
+          type: array
+          items:
+            type: object
+            properties:
+              objective: { type: string }
+              keyResults:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    metric: { type: string }
+                    target: { type: number }
+        initiatives:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              title: { type: string }
+              tasks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    title: { type: string }
+                    assignee: { type: string }
