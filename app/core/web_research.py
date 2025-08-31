@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-from duckduckgo_search import AsyncDDGS
+from duckduckgo_search import DDGS
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 import trafilatura
@@ -24,7 +24,7 @@ class WebResearchPipeline:
     
     def __init__(self):
         self.session = None
-        self.ddgs = AsyncDDGS()
+        self.ddgs = DDGS()
         self.trusted_domains = {
             'wikipedia.org', 'reuters.com', 'bloomberg.com', 'wsj.com',
             'ft.com', 'economist.com', 'harvard.edu', 'mit.edu', 'stanford.edu',
@@ -81,7 +81,9 @@ class WebResearchPipeline:
         """Search using DuckDuckGo"""
         try:
             results = []
-            async for result in self.ddgs.text(query, max_results=max_results):
+            # Use synchronous search since DDGS doesn't have async methods
+            search_results = self.ddgs.text(query, max_results=max_results)
+            for result in search_results:
                 results.append({
                     'url': result.get('href', ''),
                     'title': result.get('title', ''),

@@ -1,7 +1,7 @@
-import { ChatInterface } from "@/components/ChatInterface";
+import { ChatInterfaceReal } from "@/components/ChatInterfaceReal";
 
 const Index = () => {
-  return <ChatInterface />;
+  return <ChatInterfaceReal />;
 };
 
 export default Index;
