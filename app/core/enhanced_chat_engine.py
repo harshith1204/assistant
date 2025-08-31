@@ -2,6 +2,7 @@
 
 import json
 import asyncio
+import uuid
 from typing import Dict, Any, List, Optional, AsyncGenerator
 from datetime import datetime, timedelta
 from groq import AsyncGroq
@@ -55,9 +56,16 @@ class EnhancedChatEngine:
         """Process message conversationally with streaming updates"""
         
         try:
-            # Get or create conversation
+            # Ensure we have both IDs for dual context
+            conversation_id = request.conversation_id or str(uuid.uuid4())
+            conversation_id, user_id = self.memory_manager.ensure_dual_context(
+                conversation_id, 
+                user_id
+            )
+            
+            # Get or create conversation with both IDs
             conversation = await self._get_or_create_conversation(
-                request.conversation_id,
+                conversation_id,
                 user_id
             )
             
@@ -72,7 +80,7 @@ class EnhancedChatEngine:
             # Add to conversation
             conversation.add_message(user_message)
             
-            # Update memory
+            # Update both user and conversation memories
             await self.memory_manager.update_from_message(user_message, user_id)
             
             # Process through conversational flow
@@ -641,8 +649,9 @@ Respond naturally and conversationally.""".format(
         conversation: Conversation,
         user_id: Optional[str]
     ) -> Dict[str, Any]:
-        """Prepare context for processing"""
+        """Prepare dual context for processing"""
         
+        # Get both user-level and conversation-level contexts
         context = await self.memory_manager.get_conversation_context(
             conversation.conversation_id,
             user_id
@@ -650,11 +659,12 @@ Respond naturally and conversationally.""".format(
         
         return {
             "conversation_id": conversation.conversation_id,
+            "user_id": user_id,
             "message_count": conversation.get_message_count(),
             "entities": context.entities,
             "topics": context.topics,
-            "short_term": context.short_term,
-            "long_term": context.long_term
+            "conversation_context": context.short_term,  # Conversation-specific
+            "user_context": context.long_term  # User-level across conversations
         }
     
     async def _generate_conversation_summary(

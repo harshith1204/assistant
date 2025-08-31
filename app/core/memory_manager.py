@@ -93,9 +93,18 @@ class MemoryManager:
         conversation_id: str,
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        memory_type: str = "both"  # "user", "conversation", or "both"
     ) -> Dict[str, Any]:
-        """Add information to memory"""
+        """Add information to memory
+        
+        Args:
+            conversation_id: The conversation identifier
+            content: The content to store
+            metadata: Additional metadata
+            user_id: The user identifier (required for user-level memories)
+            memory_type: Where to store - "user" (long-term), "conversation" (short-term), or "both"
+        """
         # Prepare metadata
         meta = metadata or {}
         meta.update({
@@ -104,34 +113,37 @@ class MemoryManager:
             "user_id": user_id or "anonymous"
         })
         
-        # Always update short-term cache (in-memory) first
-        if conversation_id not in self.short_term_cache:
-            self.short_term_cache[conversation_id] = {
-                "messages": [],
-                "context": {},
+        # Store in short-term cache for conversation context
+        if memory_type in ["conversation", "both"]:
+            if conversation_id not in self.short_term_cache:
+                self.short_term_cache[conversation_id] = {
+                    "messages": [],
+                    "context": {},
+                    "timestamp": datetime.now(timezone.utc)
+                }
+            
+            self.short_term_cache[conversation_id]["messages"].append({
+                "content": content,
+                "metadata": meta,
                 "timestamp": datetime.now(timezone.utc)
-            }
+            })
         
-        self.short_term_cache[conversation_id]["messages"].append({
-            "content": content,
-            "metadata": meta,
-            "timestamp": datetime.now(timezone.utc)
-        })
-        
-        # Try to add to long-term memory (Mem0)
+        # Add to long-term memory (Mem0) for user context
         mem0_result = None
         mem0_error = None
-        try:
-            # Sanitize metadata for mem0
-            sanitized_meta = self._sanitize_metadata(meta)
-            
-            # Add to Mem0 (long-term)
-            mem0_result = await asyncio.to_thread(
-                self.memory.add,
-                content,
-                user_id=user_id or conversation_id,
-                metadata=sanitized_meta
-            )
+        
+        if memory_type in ["user", "both"] and user_id:
+            try:
+                # Sanitize metadata for mem0
+                sanitized_meta = self._sanitize_metadata(meta)
+                
+                # Add to Mem0 with user_id for cross-conversation persistence
+                mem0_result = await asyncio.to_thread(
+                    self.memory.add,
+                    content,
+                    user_id=user_id,  # Always use user_id for long-term
+                    metadata=sanitized_meta
+                )
             
             logger.info(
                 "Added to long-term memory",
@@ -157,37 +169,58 @@ class MemoryManager:
         query: str,
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        limit: int = 5
+        limit: int = 5,
+        search_scope: str = "both"  # "user", "conversation", or "both"
     ) -> List[Dict[str, Any]]:
-        """Search memories"""
+        """Search memories
+        
+        Args:
+            query: The search query
+            conversation_id: The conversation identifier
+            user_id: The user identifier
+            limit: Maximum number of results
+            search_scope: Where to search - "user" (long-term), "conversation" (short-term), or "both"
+        """
+        results = []
+        
         try:
-            # Search in Mem0
-            search_result = await asyncio.to_thread(
-                self.memory.search,
-                query,
-                user_id=user_id or conversation_id,
-                limit=limit
-            )
+            # Search user-level long-term memories if user_id is provided
+            if search_scope in ["user", "both"] and user_id:
+                search_result = await asyncio.to_thread(
+                    self.memory.search,
+                    query,
+                    user_id=user_id,  # Search user memories
+                    limit=limit
+                )
+                
+                # Extract results from the response (handles both v1.0 and v1.1 formats)
+                if isinstance(search_result, dict) and "results" in search_result:
+                    user_results = search_result["results"]
+                else:
+                    # Fallback for older format or direct list
+                    user_results = search_result if isinstance(search_result, list) else []
+                
+                # Mark these as user-level memories
+                for result in user_results:
+                    result["memory_level"] = "user"
+                    results.extend(user_results)
             
-            # Extract results from the response (handles both v1.0 and v1.1 formats)
-            if isinstance(search_result, dict) and "results" in search_result:
-                results = search_result["results"]
-            else:
-                # Fallback for older format or direct list
-                results = search_result if isinstance(search_result, list) else []
-            
-            # Combine with short-term cache if available
-            if conversation_id and conversation_id in self.short_term_cache:
+            # Search conversation-level short-term cache
+            if search_scope in ["conversation", "both"] and conversation_id and conversation_id in self.short_term_cache:
                 cache_data = self.short_term_cache[conversation_id]
-                # Add recent messages from cache
-                recent_messages = cache_data.get("messages", [])[-3:]
-                for msg in recent_messages:
-                    results.append({
-                        "memory": msg["content"],
-                        "metadata": msg["metadata"],
-                        "score": 0.9,  # High score for recent messages
-                        "source": "short_term"
-                    })
+                # Add recent messages from cache that match the query
+                recent_messages = cache_data.get("messages", [])
+                query_lower = query.lower()
+                
+                for msg in recent_messages[-10:]:  # Check last 10 messages
+                    if query_lower in msg["content"].lower():
+                        results.append({
+                            "memory": msg["content"],
+                            "metadata": msg["metadata"],
+                            "score": 0.95,  # High score for recent relevant messages
+                            "source": "short_term",
+                            "memory_level": "conversation"
+                        })
             
             return results
             
@@ -200,30 +233,37 @@ class MemoryManager:
         conversation_id: str,
         user_id: Optional[str] = None
     ) -> ConversationContext:
-        """Get complete context for a conversation"""
+        """Get complete context for a conversation
+        
+        Returns both user-level (long-term) and conversation-level (short-term) contexts
+        """
         try:
             context = ConversationContext()
             
-            # Get short-term context from cache
+            # Always get conversation-level short-term context
             if conversation_id in self.short_term_cache:
                 cache_data = self.short_term_cache[conversation_id]
                 context.short_term = {
                     "recent_messages": cache_data.get("messages", [])[-5:],
                     "session_start": cache_data.get("timestamp", datetime.now(timezone.utc)).isoformat(),
-                    "message_count": len(cache_data.get("messages", []))
+                    "message_count": len(cache_data.get("messages", [])),
+                    "conversation_id": conversation_id
                 }
             
-            # Get long-term context from Mem0
-            memories_result = await asyncio.to_thread(
-                self.memory.get_all,
-                user_id=user_id or conversation_id
-            )
-            
-            # Extract memories from the response (handles both v1.0 and v1.1 formats)
-            if isinstance(memories_result, dict) and "results" in memories_result:
-                all_memories = memories_result["results"]
-            elif isinstance(memories_result, list):
-                all_memories = memories_result
+            # Get user-level long-term context only if user_id is provided
+            if user_id:
+                memories_result = await asyncio.to_thread(
+                    self.memory.get_all,
+                    user_id=user_id  # Always use user_id for long-term
+                )
+                
+                # Extract memories from the response (handles both v1.0 and v1.1 formats)
+                if isinstance(memories_result, dict) and "results" in memories_result:
+                    all_memories = memories_result["results"]
+                elif isinstance(memories_result, list):
+                    all_memories = memories_result
+                else:
+                    all_memories = []
             else:
                 all_memories = []
             
@@ -391,6 +431,21 @@ class MemoryManager:
             # Handle object format
             metadata = getattr(memory, "metadata", {})
             return metadata.get("timestamp") if metadata else None
+    
+    def ensure_dual_context(self, conversation_id: str, user_id: Optional[str] = None) -> tuple[str, str]:
+        """Ensure we have both conversation_id and user_id
+        
+        Returns:
+            Tuple of (conversation_id, user_id) where user_id is generated if not provided
+        """
+        if not user_id:
+            # Generate an anonymous user_id that persists for the session
+            # This could be stored in browser localStorage for persistence
+            import uuid
+            user_id = f"anon_{uuid.uuid4().hex[:12]}"
+            logger.info("Generated anonymous user_id", user_id=user_id)
+        
+        return conversation_id, user_id
     
     async def get_memory_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Get memory statistics"""
