@@ -63,7 +63,11 @@ interface Message {
   briefId?: string;
 }
 
-export const ConversationalChat: React.FC = () => {
+interface ConversationalChatProps {
+  userId?: string;
+}
+
+export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isConnected, setIsConnected] = useState(false);
@@ -79,7 +83,7 @@ export const ConversationalChat: React.FC = () => {
 
   // Initialize WebSocket connection
   useEffect(() => {
-    const ws = new WebSocketService();
+    const ws = new WebSocketService(userId);
     wsRef.current = ws;
 
     // Set up message handlers
@@ -99,7 +103,7 @@ export const ConversationalChat: React.FC = () => {
     return () => {
       ws.disconnect();
     };
-  }, []);
+  }, [userId]);
 
   const handleConversationalUpdate = (update: ConversationalUpdate) => {
     console.log('Conversational update:', update);
@@ -402,130 +406,40 @@ export const ConversationalChat: React.FC = () => {
                           </CardContent>
                         </Card>
                       )}
-                      
-                      {message.briefId && (
-                        <Badge variant="outline" className="mt-2">
-                          Research Brief: {message.briefId.slice(0, 8)}
-                        </Badge>
+
+                      {currentAction && (
+                        <div className="mt-3">
+                          <p className="text-sm font-medium">{currentAction}</p>
+                          <Progress value={actionProgress} className="h-2" />
+                        </div>
                       )}
                     </div>
                   </div>
-                  
-                  {message.status === 'sending' && (
-                    <Loader2 className="w-3 h-3 animate-spin mt-1" />
-                  )}
                 </div>
               </div>
             ))}
-            
-            {isTyping && (
-              <div className="flex justify-start">
-                <div className="bg-secondary rounded-lg p-3">
-                  <div className="flex items-center gap-2">
-                    <Bot className="w-4 h-4" />
-                    <div className="flex gap-1">
-                      <span className="w-2 h-2 bg-current rounded-full animate-bounce" />
-                      <span className="w-2 h-2 bg-current rounded-full animate-bounce delay-100" />
-                      <span className="w-2 h-2 bg-current rounded-full animate-bounce delay-200" />
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-            
-            {currentAction && (
-              <Alert>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <AlertDescription>
-                  <div className="space-y-2">
-                    <p>{currentAction}</p>
-                    <Progress value={actionProgress} className="h-2" />
-                  </div>
-                </AlertDescription>
-              </Alert>
-            )}
-            
             <div ref={messagesEndRef} />
           </div>
         </ScrollArea>
 
-        <div className="border-t p-4">
-          <div className="flex gap-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="shrink-0"
-              title="Attach file"
-            >
-              <Paperclip className="w-4 h-4" />
-            </Button>
-            
-            <Input
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-              placeholder={
-                waitingFor === 'clarification'
-                  ? 'Please provide clarification...'
-                  : waitingFor === 'confirmation'
-                  ? 'Confirm or modify the action...'
-                  : 'Ask me anything - research, CRM updates, project tasks...'
-              }
-              className="flex-1"
-              disabled={!isConnected}
-            />
-            
-            <Button
-              variant="ghost"
-              size="icon"
-              className="shrink-0"
-              title="Voice input"
-            >
+        <div className="p-4 border-t">
+          <div className="flex gap-2 items-center">
+            <Button variant="outline" size="icon">
               <Mic className="w-4 h-4" />
             </Button>
-            
-            <Button
-              onClick={sendMessage}
-              disabled={!input.trim() || !isConnected}
-              className="shrink-0"
-            >
-              <Send className="w-4 h-4" />
+            <Button variant="outline" size="icon">
+              <Paperclip className="w-4 h-4" />
             </Button>
-          </div>
-          
-          <div className="mt-2 flex gap-2 flex-wrap">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setInput('Research market trends for SaaS')}
-            >
-              <Search className="w-3 h-3 mr-1" />
-              Research
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setInput('Create a task for follow-up')}
-            >
-              <FileText className="w-3 h-3 mr-1" />
-              Create Task
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setInput('Schedule a meeting for tomorrow')}
-            >
-              <Calendar className="w-3 h-3 mr-1" />
-              Schedule
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setInput('Generate a report of our conversation')}
-            >
-              <TrendingUp className="w-3 h-3 mr-1" />
-              Report
+            <Input
+              ref={inputRef}
+              placeholder="Type your message..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+            />
+            <Button onClick={sendMessage} disabled={!isConnected || !input.trim()}>
+              <Send className="w-4 h-4 mr-2" />
+              Send
             </Button>
           </div>
         </div>
