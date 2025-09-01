@@ -363,6 +363,88 @@ class ConversationalRouter:
             del self.active_contexts[conversation_id]
 
 
+class IntentDetector:
+    """Simple intent detector for the 5-stage pipeline"""
+    
+    def __init__(self):
+        self.client = AsyncGroq(api_key=settings.groq_api_key)
+        self.model = settings.llm_model
+    
+    async def detect_intent(
+        self,
+        message: str,
+        context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Detect intent and return label, confidence, and entities"""
+        
+        # Quick pattern matching for common intents
+        message_lower = message.lower()
+        
+        # Profile update patterns
+        if any(phrase in message_lower for phrase in ["remember that", "save that", "note that", "i am", "i prefer", "my name is"]):
+            return {
+                "label": "profile_update",
+                "confidence": 0.8,
+                "entities": self._extract_profile_facts(message),
+                "clarification_question": None
+            }
+        
+        # Research patterns
+        if any(phrase in message_lower for phrase in ["research", "find out", "look up", "what is", "how does"]):
+            return {
+                "label": "research",
+                "confidence": 0.85,
+                "entities": {"topics": self._extract_topics(message)},
+                "clarification_question": None
+            }
+        
+        # General chat with lower confidence
+        return {
+            "label": "general",
+            "confidence": 0.6,
+            "entities": {},
+            "clarification_question": None
+        }
+    
+    def _extract_profile_facts(self, message: str) -> Dict[str, Any]:
+        """Extract profile facts from message"""
+        facts = []
+        
+        # Common profile patterns
+        import re
+        patterns = [
+            (r"my name is (\w+)", "name"),
+            (r"i prefer (.*?)(?:\.|$)", "preference"),
+            (r"i am (.*?)(?:\.|$)", "description"),
+            (r"i work at (.*?)(?:\.|$)", "workplace"),
+            (r"i live in (.*?)(?:\.|$)", "location")
+        ]
+        
+        for pattern, key in patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if match:
+                facts.append({"key": key, "value": match.group(1).strip(), "priority": 60})
+        
+        return {"profile_facts": facts} if facts else {}
+    
+    def _extract_topics(self, message: str) -> List[str]:
+        """Extract research topics from message"""
+        # Simple topic extraction
+        topics = []
+        topic_keywords = {
+            "market": ["market", "industry", "sector"],
+            "competitors": ["competitor", "competition", "rival"],
+            "pricing": ["price", "cost", "pricing"],
+            "technology": ["tech", "software", "platform"]
+        }
+        
+        message_lower = message.lower()
+        for topic, keywords in topic_keywords.items():
+            if any(kw in message_lower for kw in keywords):
+                topics.append(topic)
+        
+        return topics
+
 class ConversationalFlowManager:
     """Manage conversational flow and state transitions"""
     
