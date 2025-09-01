@@ -311,10 +311,12 @@ export class WebSocketService {
 
         this.ws.onmessage = (event) => {
           try {
+            console.log('Raw WebSocket message received:', event.data);
             const message = JSON.parse(event.data);
+            console.log('Parsed WebSocket message:', message);
             this.handleMessage(message);
           } catch (error) {
-            console.error('Failed to parse WebSocket message:', error);
+            console.error('Failed to parse WebSocket message:', error, 'Raw data:', event.data);
           }
         };
 

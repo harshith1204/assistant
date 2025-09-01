@@ -1,4 +1,4 @@
-"""WebSocket handler for real-time chat"""
+"""Simplified WebSocket handler for keyword-based conversational chat"""
 
 import json
 import asyncio
@@ -6,140 +6,100 @@ from typing import Dict, Set, Optional
 from datetime import datetime, timezone
 from fastapi import WebSocket, WebSocketDisconnect
 import structlog
+import uuid
 
 from app.chat_models import (
-    ChatRequest, ChatResponse, WebSocketMessage,
-    StreamChunk, MessageRole, MessageType
+    ChatRequest, WebSocketMessage,
+    MessageRole, MessageType
 )
 from app.core.chat_engine import ChatEngine
 
 logger = structlog.get_logger()
 
 
+class DateTimeEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles datetime objects"""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+
 class ConnectionManager:
-    """Manages WebSocket connections"""
-    
+    """Simple connection manager for WebSocket chat"""
+
     def __init__(self):
+        print("🔧 Initializing ConnectionManager...")
         self.active_connections: Dict[str, WebSocket] = {}
-        self.user_connections: Dict[str, Set[str]] = {}  # user_id -> connection_ids
         self.connection_user: Dict[str, str] = {}  # connection_id -> user_id
-        self.chat_engine = ChatEngine()
-    
+        try:
+            self.chat_engine = ChatEngine()
+            print("✅ Chat engine initialized successfully")
+        except Exception as e:
+            print(f"❌ Failed to initialize chat engine: {e}")
+            self.chat_engine = None
+
     async def connect(
         self,
         websocket: WebSocket,
         connection_id: str,
         user_id: Optional[str] = None
     ):
-        """Accept and register a new connection with dual context"""
+        """Accept and register a new connection"""
         await websocket.accept()
         self.active_connections[connection_id] = websocket
-        
-        # Try to read business_id from websocket scope if available
-        business_id = None
-        try:
-            business_id = websocket.scope.get("state", {}).get("business_id")
-        except Exception:
-            business_id = None
 
-        # Ensure a stable user_id for this connection
+        # Generate user_id if not provided
         if not user_id:
-            import uuid
-            user_id = f"anon_{uuid.uuid4().hex[:12]}"
-            logger.info("Generated anonymous user_id for websocket", user_id=user_id)
+            user_id = f"anon_{uuid.uuid4().hex[:8]}"
 
-        # Track mappings
         self.connection_user[connection_id] = user_id
-        if user_id not in self.user_connections:
-            self.user_connections[user_id] = set()
-        self.user_connections[user_id].add(connection_id)
-        
-        # Send user_id back to client for session persistence
-        await self.send_message(
-            connection_id,
-            WebSocketMessage(
-                type="session_info",
-                data={"user_id": user_id, "business_id": business_id, "connection_id": connection_id}
-            )
-        )
-        
-        logger.info(
-            "WebSocket connected",
-            connection_id=connection_id,
-            user_id=user_id
-        )
-        
-        # Send welcome message
+
+        # Send connection confirmation
         await self.send_message(
             connection_id,
             WebSocketMessage(
                 type="connected",
                 data={
                     "connection_id": connection_id,
-                    "message": "Connected to chat service",
+                    "user_id": user_id,
+                    "message": "Connected to conversational chat",
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 }
             )
         )
-    
+
+        logger.info("WebSocket connected", connection_id=connection_id, user_id=user_id)
+
     def disconnect(self, connection_id: str):
         """Remove a connection"""
         if connection_id in self.active_connections:
             del self.active_connections[connection_id]
-            
-            # Remove from user connections
             user_id = self.connection_user.pop(connection_id, None)
-            if user_id and user_id in self.user_connections:
-                connections = self.user_connections[user_id]
-                if connection_id in connections:
-                    connections.remove(connection_id)
-                if not connections:
-                    del self.user_connections[user_id]
-            
-            logger.info("WebSocket disconnected", connection_id=connection_id)
-    
-    def _serialize_datetime(self, obj):
-        """Recursively convert datetime objects to ISO format strings"""
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        elif isinstance(obj, dict):
-            return {key: self._serialize_datetime(value) for key, value in obj.items()}
-        elif isinstance(obj, list):
-            return [self._serialize_datetime(item) for item in obj]
-        else:
-            return obj
-    
+            logger.info("WebSocket disconnected", connection_id=connection_id, user_id=user_id)
+
     async def send_message(
         self,
         connection_id: str,
         message: WebSocketMessage
     ):
         """Send a message to a specific connection"""
+        print(f"📤 Sending message to {connection_id}: type={message.type}")
         websocket = self.active_connections.get(connection_id)
         if websocket:
             try:
-                # Convert to dict and ensure all datetime objects are serialized
                 message_data = message.model_dump()
-                # Recursively convert all datetime objects to ISO format strings
-                message_data = self._serialize_datetime(message_data)
-                await websocket.send_json(message_data)
+                # Serialize with custom encoder to handle datetime objects
+                json_string = json.dumps(message_data, cls=DateTimeEncoder)
+                print(f"📦 Message data: {json_string[:100]}...")
+                await websocket.send_text(json_string)
+                print(f"✅ Message sent successfully to {connection_id}")
             except Exception as e:
-                logger.error(
-                    "Failed to send message",
-                    connection_id=connection_id,
-                    error=str(e)
-                )
+                print(f"❌ Failed to send message to {connection_id}: {e}")
+                logger.error("Failed to send message", connection_id=connection_id, error=str(e))
                 self.disconnect(connection_id)
-    
-    async def broadcast_to_user(
-        self,
-        user_id: str,
-        message: WebSocketMessage
-    ):
-        """Broadcast a message to all connections of a user"""
-        connections = self.user_connections.get(user_id, set())
-        for connection_id in connections:
-            await self.send_message(connection_id, message)
+        else:
+            print(f"⚠️ No active connection found for {connection_id}")
     
     async def handle_chat_message(
         self,
@@ -147,338 +107,151 @@ class ConnectionManager:
         data: Dict,
         user_id: Optional[str] = None
     ):
-        """Handle incoming chat message with dual context"""
+        """Handle incoming chat message with simple keyword detection"""
         try:
-            # Ensure user_id for dual context
+            print(f"🤖 Processing chat message: {data}")
+            logger.info("Handling chat message", connection_id=connection_id, data=data)
             user_id = user_id or self.connection_user.get(connection_id)
-            if not user_id:
-                import uuid
-                user_id = f"anon_{uuid.uuid4().hex[:12]}"
-                self.connection_user[connection_id] = user_id
-                if user_id not in self.user_connections:
-                    self.user_connections[user_id] = set()
-                self.user_connections[user_id].add(connection_id)
-                logger.info("Generated anonymous user_id for chat", user_id=user_id)
-                # Inform client of assigned user_id
-                await self.send_message(
-                    connection_id,
-                    WebSocketMessage(
-                        type="session_info",
-                        data={"user_id": user_id, "connection_id": connection_id}
-                    )
-                )
-            
-            # Parse request
-            request = ChatRequest(**data)
-            
+
+            # Handle nested message structure
+            if "data" in data and isinstance(data["data"], dict):
+                message_data = data["data"]
+                message_text = message_data.get("message", "")
+                conversation_id = message_data.get("conversation_id", f"{uuid.uuid4().hex[:8]}")
+                stream = message_data.get("stream", True)
+            else:
+                message_text = data.get("message", "")
+                conversation_id = data.get("conversation_id", f"conv_{uuid.uuid4().hex[:8]}")
+                stream = data.get("stream", True)
+
+            print(f"📝 Message text: '{message_text}', User: {user_id}, Conversation: {conversation_id}")
+            logger.info("Extracted message text", connection_id=connection_id, message_text=message_text, user_id=user_id)
+
+            # Simple keyword detection for research vs general chat
+            is_research = self._is_research_query(message_text)
+
+            # Create chat request
+            request = ChatRequest(
+                message=message_text,
+                conversation_id=conversation_id,
+                use_web_search=is_research,
+                stream=stream
+            )
+
             # Send typing indicator
             await self.send_message(
                 connection_id,
-                WebSocketMessage(
-                    type="typing",
-                    data={"conversation_id": request.conversation_id}
-                )
+                WebSocketMessage(type="typing", data={"status": "thinking"})
             )
-            
-            # Use conversational flow when requested
-            if data.get("conversational", True):
-                await self.handle_conversational_message(
-                    connection_id,
-                    request,
-                    user_id
-                )
-            elif request.stream:
-                # Stream response
-                await self.stream_response(
-                    connection_id,
-                    request,
-                    user_id
-                )
-            else:
-                # Send complete response
-                response = await self.chat_engine.process_message(
-                    request,
-                    user_id
-                )
-                
+
+            # Check if chat engine is available
+            if not self.chat_engine:
+                print(f"❌ Chat engine not available for connection {connection_id}")
                 await self.send_message(
                     connection_id,
-                    WebSocketMessage(
-                        type="message",
-                        data=response.model_dump()
-                    )
+                    WebSocketMessage(type="error", data={"error": "Chat engine not initialized. Check API key configuration."})
                 )
-                
+                return
+
+            # Stream the response
+            await self.stream_chat_response(connection_id, request, user_id)
+
         except Exception as e:
-            logger.error(
-                "Failed to handle chat message",
-                connection_id=connection_id,
-                error=str(e)
-            )
+            logger.error("Failed to handle chat message", error=str(e))
             await self.send_message(
                 connection_id,
-                WebSocketMessage(
-                    type="error",
-                    data={"error": str(e)}
-                )
+                WebSocketMessage(type="error", data={"error": str(e)})
             )
+
+    def _is_research_query(self, message: str) -> bool:
+        """Simple keyword-based research detection"""
+        research_keywords = [
+            "research", "find out", "look up", "search", "analyze", "investigate",
+            "what is", "tell me about", "explain", "how does", "market", "competitor",
+            "pricing", "trends", "statistics", "data", "information"
+        ]
+        message_lower = message.lower()
+        return any(keyword in message_lower for keyword in research_keywords)
     
-    async def stream_response(
+    async def stream_chat_response(
         self,
         connection_id: str,
         request: ChatRequest,
         user_id: Optional[str] = None
     ):
-        """Stream chat response"""
+        """Stream chat response using the chat engine"""
         try:
-            conversation_id = request.conversation_id or str(asyncio.create_task(asyncio.sleep(0)).get_coro().cr_frame.f_locals.get('conversation_id', 'new'))
-            
-            # Start streaming
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="stream_start",
-                    data={"conversation_id": conversation_id}
-                )
-            )
-            
-            # Stream events; convert chat.token to legacy stream_chunk for backward compatibility
+            logger.info("Starting to stream chat response", connection_id=connection_id, request_message=request.message, user_id=user_id)
+            # Stream response from chat engine
             full_response = ""
+            event_count = 0
+            has_received_events = False
+
             async for event in self.chat_engine.stream_message(request, user_id):
-                et = event.get("type")
-                if et == "chat.token":
+                has_received_events = True
+                event_count += 1
+                logger.info("Received chat engine event", connection_id=connection_id, event_type=event.get("type"), event_count=event_count)
+                event_type = event.get("type", "")
+
+                if event_type == "chat.token":
+                    # Send token chunks
                     delta = event.get("delta", "")
                     full_response += delta
-                    stream_chunk = StreamChunk(
-                        conversation_id=conversation_id,
-                        content=delta,
-                        is_final=False
-                    )
                     await self.send_message(
                         connection_id,
                         WebSocketMessage(
-                            type="stream_chunk",
-                            data=stream_chunk.model_dump()
+                            type="token",
+                            data={"delta": delta, "conversation_id": request.conversation_id}
                         )
                     )
-                else:
-                    # Forward other typed events as-is
+                    print(f"🔤 Sent token: '{delta}'")
+                elif event_type == "chat.final":
+                    # Send final message
+                    message_data = event.get("message", {})
+                    final_message = {
+                        "conversation_id": request.conversation_id,
+                        "content": full_response,
+                        "role": message_data.get("role", "assistant"),
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                    print(f"🏁 Sending final message: {final_message}")
                     await self.send_message(
                         connection_id,
-                        WebSocketMessage(type=et, data=event)
+                        WebSocketMessage(
+                            type="message_complete",
+                            data=final_message
+                        )
                     )
-            
-            # Send final chunk
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="stream_end",
-                    data={
-                        "conversation_id": conversation_id,
-                        "full_response": full_response
-                    }
-                )
-            )
-            
-        except Exception as e:
-            logger.error(
-                "Failed to stream response",
-                connection_id=connection_id,
-                error=str(e)
-            )
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="stream_error",
-                    data={"error": str(e)}
-                )
-            )
-    
-    async def handle_conversational_message(
-        self,
-        connection_id: str,
-        request: ChatRequest,
-        user_id: Optional[str] = None
-    ):
-        """Handle conversational message with enhanced flow"""
-        try:
-            # Process through merged chat engine conversational flow
-            async for update in self.chat_engine.process_conversational_message(
-                request,
-                user_id
-            ):
-                # Send each update to the client
+                elif event_type in ["research.started", "research.done", "memory.written"]:
+                    # Forward research/memory events
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(type=event_type, data=event)
+                    )
+
+            # If no events were received, send a fallback response
+            if not has_received_events:
+                logger.warning("No events received from chat engine, sending fallback response", connection_id=connection_id)
+                fallback_message = "I received your message but couldn't process it properly. Please try again."
                 await self.send_message(
                     connection_id,
                     WebSocketMessage(
-                        type="conversational_update",
-                        data=update
-                    )
-                )
-                
-                # Handle special update types
-                if update.get("type") == "clarification_needed":
-                    # Store that we're waiting for clarification
-                    self.active_connections[connection_id].waiting_for = "clarification"
-                    
-                elif update.get("type") == "confirmation_needed":
-                    # Store that we're waiting for confirmation
-                    self.active_connections[connection_id].waiting_for = "confirmation"
-                    
-        except Exception as e:
-            logger.error(
-                "Failed to handle conversational message",
-                connection_id=connection_id,
-                error=str(e)
-            )
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="conversational_error",
-                    data={"error": str(e)}
-                )
-            )
-    
-    async def handle_research_request(
-        self,
-        connection_id: str,
-        data: Dict,
-        user_id: Optional[str] = None
-    ):
-        """Handle research request"""
-        try:
-            # Send status update
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="research_status",
-                    data={
-                        "status": "started",
-                        "message": "Research initiated..."
-                    }
-                )
-            )
-            
-            # Create chat request with research flag
-            request = ChatRequest(
-                message=data.get("query", ""),
-                use_web_search=True,
-                conversation_id=data.get("conversation_id")
-            )
-            
-            # Process with research
-            response = await self.chat_engine.process_message(request, user_id)
-            
-            # Send research results
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="research_complete",
-                    data=response.model_dump()
-                )
-            )
-            
-        except Exception as e:
-            logger.error(
-                "Failed to handle research request",
-                connection_id=connection_id,
-                error=str(e)
-            )
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="research_error",
-                    data={"error": str(e)}
-                )
-            )
-    
-    async def handle_conversation_list(
-        self,
-        connection_id: str,
-        user_id: Optional[str] = None
-    ):
-        """Send list of conversations"""
-        try:
-            conversations = await self.chat_engine.list_conversations(user_id)
-            
-            conversation_list = [
-                {
-                    "conversation_id": conv.conversation_id,
-                    "title": conv.title or f"Conversation {conv.conversation_id[:8]}",
-                    "created_at": conv.created_at.isoformat(),
-                    "updated_at": conv.updated_at.isoformat(),
-                    "message_count": conv.get_message_count(),
-                    "status": conv.status
-                }
-                for conv in conversations
-            ]
-            
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="conversation_list",
-                    data={"conversations": conversation_list}
-                )
-            )
-            
-        except Exception as e:
-            logger.error(
-                "Failed to get conversation list",
-                connection_id=connection_id,
-                error=str(e)
-            )
-    
-    async def handle_conversation_history(
-        self,
-        connection_id: str,
-        data: Dict,
-        user_id: Optional[str] = None
-    ):
-        """Send conversation history"""
-        try:
-            conversation_id = data.get("conversation_id")
-            if not conversation_id:
-                raise ValueError("conversation_id is required")
-            
-            conversation = await self.chat_engine.get_conversation(conversation_id)
-            
-            if conversation:
-                messages = [
-                    {
-                        "message_id": msg.message_id,
-                        "role": msg.role.value,
-                        "content": msg.content,
-                        "timestamp": msg.timestamp.isoformat(),
-                        "type": msg.message_type.value
-                    }
-                    for msg in conversation.messages
-                ]
-                
-                await self.send_message(
-                    connection_id,
-                    WebSocketMessage(
-                        type="conversation_history",
+                        type="message_complete",
                         data={
-                            "conversation_id": conversation_id,
-                            "messages": messages,
-                            "context": conversation.context.model_dump()
+                            "conversation_id": request.conversation_id,
+                            "content": fallback_message,
+                            "role": "assistant",
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         }
                     )
                 )
-            else:
-                await self.send_message(
-                    connection_id,
-                    WebSocketMessage(
-                        type="error",
-                        data={"error": "Conversation not found"}
-                    )
-                )
-                
+
         except Exception as e:
-            logger.error(
-                "Failed to get conversation history",
-                connection_id=connection_id,
-                error=str(e)
+            logger.error("Failed to stream chat response", error=str(e))
+            # Send error message to client
+            await self.send_message(
+                connection_id,
+                WebSocketMessage(type="error", data={"error": str(e)})
             )
 
 
@@ -491,95 +264,47 @@ async def websocket_endpoint(
     connection_id: str,
     user_id: Optional[str] = None
 ):
-    """WebSocket endpoint handler"""
+    """Simplified WebSocket endpoint for conversational chat"""
+    print(f"🔌 WebSocket endpoint called: connection_id={connection_id}, user_id={user_id}")
     await manager.connect(websocket, connection_id, user_id)
-    
+    print(f"✅ WebSocket connected: {connection_id}")
+
     try:
         while True:
             # Receive message
+            print(f"⏳ Waiting for message on connection: {connection_id}")
             data = await websocket.receive_json()
-            
-            # Route based on message type
-            message_type = data.get("type")
-            
-            # New unified dispatcher on a single socket
-            if message_type == "chat.send":
-                payload = data.get("data", {})
-                # Build ChatRequest and forward streaming events 1:1
-                try:
-                    request = ChatRequest(**payload)
-                except Exception:
-                    # Backward compat: treat legacy shape as already ChatRequest-like
-                    request = ChatRequest(**(data.get("data", {})))
-                async for event in manager.chat_engine.stream_message(request, user_id or manager.connection_user.get(connection_id)):
-                    await manager.send_message(
-                        connection_id,
-                        WebSocketMessage(type=event.get("type", "chat.token"), data=event)
-                    )
-            elif message_type == "session.resume":
-                payload = data.get("data", {})
-                manager.connection_user[connection_id] = payload.get("user_id") or user_id or manager.connection_user.get(connection_id)
+            print(f"📨 Received message on {connection_id}: {data}")
+
+            # Debug: Log received message
+            logger.info("Received WebSocket message", connection_id=connection_id, data=data)
+
+            # Handle different message types
+            message_type = data.get("type", "chat")
+
+            # Handle chat messages (explicit type or fallback for messages with message field)
+            if message_type == "test":
+                # Simple test message
+                print(f"🧪 Received test message: {data}")
                 await manager.send_message(
                     connection_id,
-                    WebSocketMessage(
-                        type="session_info",
-                        data={"user_id": manager.connection_user[connection_id], "connection_id": connection_id}
-                    )
+                    WebSocketMessage(type="test_response", data={"message": "WebSocket is working!", "timestamp": datetime.now(timezone.utc).isoformat()})
                 )
-            elif message_type == "memory.get":
-                payload = data.get("data", {})
-                items = await manager.chat_engine.memory_manager.search_memory(
-                    query=payload.get("query", "*"),
-                    conversation_id=payload.get("conversation_id"),
-                    user_id=payload.get("user_id") or user_id or manager.connection_user.get(connection_id),
-                    limit=int(payload.get("limit", 8)),
-                    search_scope=payload.get("scope", "both")
-                )
-                await manager.send_message(connection_id, WebSocketMessage(type="memory.snapshot", data={"items": items}))
-            elif message_type == "memory.set":
-                payload = data.get("data", {})
-                await manager.chat_engine.memory_manager.set_profile_fact(
-                    payload.get("user_id") or user_id or manager.connection_user.get(connection_id),
-                    payload["key"],
-                    payload["value"],
-                    payload.get("priority", 50)
-                )
-                await manager.send_message(connection_id, WebSocketMessage(type="memory.written", data={"level": "profile", "key": payload.get("key")}))
-            elif message_type == "agent.cancel":
-                payload = data.get("data", {})
-                if payload and payload.get("conversation_id"):
-                    await manager.chat_engine.cancel(conversation_id=payload["conversation_id"]) 
-            elif message_type == "chat":
-                # Backward compatibility with legacy clients
+            elif message_type == "chat" or ("message" in data and message_type != "ping"):
+                # Handle chat message with keyword detection
                 await manager.handle_chat_message(
                     connection_id,
-                    data.get("data", {}),
-                    user_id
-                )
-            elif message_type == "research":
-                # Backward compatibility for research trigger
-                await manager.handle_research_request(
-                    connection_id,
-                    data.get("data", {}),
-                    user_id
-                )
-            elif message_type == "list_conversations":
-                await manager.handle_conversation_list(
-                    connection_id,
-                    user_id
-                )
-            elif message_type == "get_history":
-                await manager.handle_conversation_history(
-                    connection_id,
-                    data.get("data", {}),
-                    user_id
+                    data,
+                    user_id or manager.connection_user.get(connection_id)
                 )
             elif message_type == "ping":
+                # Handle ping/pong for connection health
                 await manager.send_message(
                     connection_id,
                     WebSocketMessage(type="pong", data={})
                 )
             else:
+                # Unknown message type
                 await manager.send_message(
                     connection_id,
                     WebSocketMessage(
@@ -587,13 +312,9 @@ async def websocket_endpoint(
                         data={"error": f"Unknown message type: {message_type}"}
                     )
                 )
-                
+
     except WebSocketDisconnect:
         manager.disconnect(connection_id)
     except Exception as e:
-        logger.error(
-            "WebSocket error",
-            connection_id=connection_id,
-            error=str(e)
-        )
+        logger.error("WebSocket error", connection_id=connection_id, error=str(e))
         manager.disconnect(connection_id)

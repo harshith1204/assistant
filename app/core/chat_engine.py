@@ -18,7 +18,7 @@ from app.models import ResearchRequest, ResearchBrief
 from app.core.memory_manager import MemoryManager
 from app.core.research_engine import ResearchEngine
 from app.core.intent import (
-    ConversationalFlowManager
+    IntentDetector
 )
 from app.integrations.crm_client import CRMClient
 from app.integrations.pms_client import PMSClient
@@ -31,16 +31,18 @@ class ChatEngine:
     
     def __init__(self):
         """Initialize chat engine"""
+        print(f"🔧 Initializing ChatEngine with model: {settings.llm_model}")
         self.groq_client = AsyncGroq(api_key=settings.groq_api_key)
         self.memory_manager = MemoryManager()
         self.research_engine = ResearchEngine()
-        # Enhanced conversational capabilities
-        self.flow_manager = ConversationalFlowManager()
+        # Simple intent detection
+        self.intent_detector = IntentDetector()
         self.crm_client = CRMClient()
         self.pms_client = PMSClient()
         self.conversations: Dict[str, Conversation] = {}
         self._turn_counters: Dict[str, int] = {}
         self._cancel_signals: Dict[str, asyncio.Event] = {}
+        print("✅ ChatEngine initialized successfully")
         
         # Action handlers mapping (for conversational routing)
         self.action_handlers = {
@@ -198,9 +200,7 @@ class ChatEngine:
             yield {"type": "memory.used", "conversation_id": conversation.conversation_id, "items": memory_used}
 
             # ===== STAGE 2: UNDERSTAND INTENT =====
-            from app.core.intent import IntentDetector
-            intent_detector = IntentDetector()
-            intent_result = await intent_detector.detect_intent(request.message, context)
+            intent_result = await self.intent_detector.detect_intent(request.message, context)
             intent = intent_result.get("label", "general")
             confidence = intent_result.get("confidence", 0.5)
             entities = intent_result.get("entities", {})
@@ -279,6 +279,7 @@ class ChatEngine:
             messages = await self._prepare_llm_messages(conversation, request.message, context)
 
             # Stream generation
+            print(f"🤖 Making API call with model: '{settings.groq_model}', temperature: {settings.chat_temperature}")
             stream = await self.groq_client.chat.completions.create(
                 model=settings.groq_model,
                 messages=messages,
@@ -984,6 +985,7 @@ class ChatEngine:
             )
             
             # Generate response
+            print(f"🤖 Making non-stream API call with model: '{settings.groq_model}'")
             response = await self.groq_client.chat.completions.create(
                 model=settings.groq_model,
                 messages=messages,

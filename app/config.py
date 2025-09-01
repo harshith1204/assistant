@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     rate_limit_period: int = Field(3600, env="RATE_LIMIT_PERIOD")
     
     # LLM Settings
-    llm_model: str = Field("moonshotai/kimi-k2-instruct", env="LLM_MODEL")
+    llm_model: str = Field("llama3-8b-8192", env="LLM_MODEL")
     llm_temperature: float = Field(0.2, env="LLM_TEMPERATURE")
     llm_max_tokens: int = Field(4000, env="LLM_MAX_TOKENS")
     

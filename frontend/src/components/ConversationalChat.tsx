@@ -99,6 +99,8 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
 
     ws.on('conversational_update', handleConversationalUpdate);
     ws.on('typing', () => setIsTyping(true));
+    ws.on('token', handleToken);  // Handle streaming tokens
+    ws.on('message_complete', handleMessageComplete);  // Handle final message
     ws.on('error', handleError);
 
     // Connect
@@ -174,13 +176,7 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
         setCurrentAction(null);
         break;
         
-      case 'chat_chunk':
-        appendToLastMessage(update.content);
-        break;
-        
-      case 'chat_complete':
-        setIsTyping(false);
-        break;
+
         
       case 'error':
         handleError({ error: update.content });
@@ -189,6 +185,29 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
       default:
         console.log('Unhandled update type:', update.type);
     }
+  };
+
+  const handleToken = (data: any) => {
+    console.log('Received token:', data.delta);
+    // If this is the first token and we're typing, create the assistant message
+    if (isTyping && messages.length > 0 && messages[messages.length - 1].role !== 'assistant') {
+      // Create a new assistant message for the streaming response
+      const assistantMessage: Message = {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        status: 'sent'
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+    }
+    appendToLastMessage(data.delta);
+  };
+
+  const handleMessageComplete = (data: any) => {
+    console.log('Message complete:', data);
+    setIsTyping(false);
+    // The message content should already be complete from the token streaming
   };
 
   const handleError = (data: any) => {
@@ -260,6 +279,12 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     setWaitingFor(null);
 
     // Send via WebSocket with conversational flag
+    console.log('Sending message via WebSocket:', {
+      message: input,
+      conversation_id: conversationId,
+      conversational: true,
+      stream: true
+    });
     wsRef.current.send('chat', {
       message: input,
       conversation_id: conversationId,
