@@ -11,7 +11,7 @@ from app.chat_models import (
     ChatRequest, ChatResponse, WebSocketMessage,
     StreamChunk, MessageRole, MessageType
 )
-from app.core.chat_engine import ChatEngine
+from app.core.chat_singleton import chat_engine
 
 logger = structlog.get_logger()
 
@@ -23,7 +23,8 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         self.user_connections: Dict[str, Set[str]] = {}  # user_id -> connection_ids
         self.connection_user: Dict[str, str] = {}  # connection_id -> user_id
-        self.chat_engine = ChatEngine()
+        # Use shared chat_engine for consistent state across connections
+        self.chat_engine = chat_engine
     
     async def connect(
         self,

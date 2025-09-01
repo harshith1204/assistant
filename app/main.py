@@ -22,7 +22,7 @@ from app.chat_models import (
     MemoryUpdate
 )
 from app.core.research_engine import ResearchEngine
-from app.core.chat_engine import ChatEngine
+from app.core.chat_singleton import chat_engine
 from app.websocket_handler import websocket_endpoint
 
 # Configure logging
@@ -47,7 +47,7 @@ logger = structlog.get_logger()
 # Store research briefs in memory (use Redis/DB in production)
 research_store: Dict[str, ResearchBrief] = {}
 research_engines: Dict[str, ResearchEngine] = {}
-chat_engine = ChatEngine()  # Global chat engine instance
+# Use shared chat_engine singleton
 
 
 @asynccontextmanager

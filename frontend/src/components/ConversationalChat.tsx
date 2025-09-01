@@ -89,7 +89,18 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     // Set up message handlers
     ws.on('connected', (data) => {
       setIsConnected(true);
-      setConversationId(data.connection_id);
+      // Persist a stable conversation_id independent of connection_id
+      try {
+        const storedConvId = localStorage.getItem('conversationId');
+        const convId = storedConvId || `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        if (!storedConvId) {
+          localStorage.setItem('conversationId', convId);
+        }
+        setConversationId(convId);
+      } catch (e) {
+        // Fallback: use connection_id when localStorage unavailable
+        setConversationId(data.connection_id);
+      }
       addSystemMessage('Connected to assistant. How can I help you today?');
     });
 
@@ -252,7 +263,7 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     // Send via WebSocket with conversational flag
     wsRef.current.send('chat', {
       message: input,
-      conversation_id: conversationId,
+      conversation_id: conversationId || localStorage.getItem('conversationId') || undefined,
       conversational: true,
       stream: true
     });
