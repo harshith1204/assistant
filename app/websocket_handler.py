@@ -22,6 +22,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self.user_connections: Dict[str, Set[str]] = {}  # user_id -> connection_ids
+        self.connection_user: Dict[str, str] = {}  # connection_id -> user_id
         self.chat_engine = ChatEngine()
     
     async def connect(
@@ -34,20 +35,26 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections[connection_id] = websocket
         
-        # Always track user connections for dual context
-        if user_id:
-            if user_id not in self.user_connections:
-                self.user_connections[user_id] = set()
-            self.user_connections[user_id].add(connection_id)
-            
-            # Send user_id back to client for session persistence
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(
-                    type="session_info",
-                    data={"user_id": user_id, "connection_id": connection_id}
-                )
+        # Ensure a stable user_id for this connection
+        if not user_id:
+            import uuid
+            user_id = f"anon_{uuid.uuid4().hex[:12]}"
+            logger.info("Generated anonymous user_id for websocket", user_id=user_id)
+
+        # Track mappings
+        self.connection_user[connection_id] = user_id
+        if user_id not in self.user_connections:
+            self.user_connections[user_id] = set()
+        self.user_connections[user_id].add(connection_id)
+        
+        # Send user_id back to client for session persistence
+        await self.send_message(
+            connection_id,
+            WebSocketMessage(
+                type="session_info",
+                data={"user_id": user_id, "connection_id": connection_id}
             )
+        )
         
         logger.info(
             "WebSocket connected",
@@ -74,12 +81,13 @@ class ConnectionManager:
             del self.active_connections[connection_id]
             
             # Remove from user connections
-            for user_id, connections in self.user_connections.items():
+            user_id = self.connection_user.pop(connection_id, None)
+            if user_id and user_id in self.user_connections:
+                connections = self.user_connections[user_id]
                 if connection_id in connections:
                     connections.remove(connection_id)
-                    if not connections:
-                        del self.user_connections[user_id]
-                    break
+                if not connections:
+                    del self.user_connections[user_id]
             
             logger.info("WebSocket disconnected", connection_id=connection_id)
     
@@ -135,10 +143,23 @@ class ConnectionManager:
         """Handle incoming chat message with dual context"""
         try:
             # Ensure user_id for dual context
+            user_id = user_id or self.connection_user.get(connection_id)
             if not user_id:
                 import uuid
                 user_id = f"anon_{uuid.uuid4().hex[:12]}"
+                self.connection_user[connection_id] = user_id
+                if user_id not in self.user_connections:
+                    self.user_connections[user_id] = set()
+                self.user_connections[user_id].add(connection_id)
                 logger.info("Generated anonymous user_id for chat", user_id=user_id)
+                # Inform client of assigned user_id
+                await self.send_message(
+                    connection_id,
+                    WebSocketMessage(
+                        type="session_info",
+                        data={"user_id": user_id, "connection_id": connection_id}
+                    )
+                )
             
             # Parse request
             request = ChatRequest(**data)

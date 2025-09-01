@@ -356,10 +356,13 @@ async def global_exception_handler(request, exc):
 
 # Chat API Endpoints
 @app.post("/chat/message", response_model=ChatResponse)
-async def send_chat_message(request: ChatRequest) -> ChatResponse:
+async def send_chat_message(request: ChatRequest, user_id: Optional[str] = Query(None)) -> ChatResponse:
     """Send a chat message and get response"""
     try:
-        response = await chat_engine.process_message(request, user_id=request.user_id)
+        response = await chat_engine.process_message(
+            request,
+            user_id=user_id or request.user_id
+        )
         return response
     except Exception as e:
         logger.error("Chat message failed", error=str(e))
