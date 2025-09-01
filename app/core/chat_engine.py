@@ -40,6 +40,7 @@ class ChatEngine:
         self.pms_client = PMSClient()
         self.conversations: Dict[str, Conversation] = {}
         self._turn_counters: Dict[str, int] = {}
+        self._cancel_signals: Dict[str, asyncio.Event] = {}
         
         # Action handlers mapping (for conversational routing)
         self.action_handlers = {
@@ -135,15 +136,26 @@ class ChatEngine:
         self,
         request: ChatRequest,
         user_id: Optional[str] = None
-    ) -> AsyncGenerator[str, None]:
-        """Stream chat response"""
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream typed events over a single WebSocket loop."""
         try:
+            # Ensure dual context
+            conversation_id = request.conversation_id or str(uuid.uuid4())
+            conversation_id, user_id = self.memory_manager.ensure_dual_context(
+                conversation_id,
+                request.user_id or user_id
+            )
+
+            if conversation_id not in self._cancel_signals:
+                self._cancel_signals[conversation_id] = asyncio.Event()
+            cancel_signal = self._cancel_signals[conversation_id]
+
             # Get or create conversation
             conversation = await self._get_or_create_conversation(
-                request.conversation_id,
+                conversation_id,
                 user_id
             )
-            
+
             # Create user message
             user_message = ChatMessage(
                 conversation_id=conversation.conversation_id,
@@ -151,28 +163,73 @@ class ChatEngine:
                 content=request.message,
                 message_type=MessageType.TEXT
             )
-            
-            # Add to conversation
+
+            # Add to conversation and memory
             conversation.add_message(user_message)
-            
-            # Update memory
             await self.memory_manager.update_from_message(user_message, user_id)
-            
-            # Get context
+
+            # Prepare context
             context = await self._prepare_context(
                 conversation,
                 request,
                 user_id
             )
-            
-            # Prepare messages for LLM
-            messages = await self._prepare_llm_messages(
-                conversation,
-                request.message,
-                context
-            )
-            
-            # Stream from LLM
+
+            # Emit memory.used
+            def _extract_line(m: Dict[str, Any]) -> str:
+                if isinstance(m, dict):
+                    return (m.get("memory") or m.get("content") or str(m)).strip()
+                return str(m).strip()
+
+            memory_used: List[Dict[str, Any]] = []
+            for m in context.get("profile", [])[:8]:
+                memory_used.append({"level": "profile", "line": _extract_line(m)})
+            for m in context.get("ranked_memories", [])[:7]:
+                memory_used.append({
+                    "level": m.get("memory_level", "user"),
+                    "line": _extract_line(m)
+                })
+            yield {"type": "memory.used", "conversation_id": conversation.conversation_id, "items": memory_used}
+
+            # Research decision
+            research_notes: Optional[str] = None
+            needs_research = await self._needs_research(request.message, context)
+            if needs_research and request.use_web_search and not cancel_signal.is_set():
+                yield {"type": "research.started", "conversation_id": conversation.conversation_id}
+                try:
+                    research_request = ResearchRequest(query=request.message, max_sources=15, deep_dive=True)
+                    brief = await self.research_engine.run_research(research_request)
+                    research_notes = await self._format_research_conversationally(brief)
+                    yield {
+                        "type": "research.done",
+                        "conversation_id": conversation.conversation_id,
+                        "brief_id": brief.brief_id,
+                        "sources": brief.total_sources,
+                        "findings": len(brief.findings),
+                        "ideas": len(brief.ideas)
+                    }
+                    research_message = ChatMessage(
+                        conversation_id=conversation.conversation_id,
+                        role=MessageRole.ASSISTANT,
+                        content=research_notes,
+                        message_type=MessageType.RESEARCH_RESULT,
+                        research_brief_id=brief.brief_id
+                    )
+                    conversation.add_message(research_message)
+                    await self.memory_manager.update_from_message(research_message, user_id)
+                    context["research_notes"] = research_notes
+                except Exception as e:
+                    logger.error("Research stage failed", error=str(e))
+                    yield {"type": "error", "stage": "research", "message": str(e)}
+
+            if cancel_signal.is_set():
+                yield {"type": "chat.final", "conversation_id": conversation.conversation_id, "message": {"content": "Cancelled.", "role": MessageRole.ASSISTANT.value}}
+                return
+
+            # LLM messages
+            messages = await self._prepare_llm_messages(conversation, request.message, context)
+
+            # Stream generation
             stream = await self.groq_client.chat.completions.create(
                 model=settings.groq_model,
                 messages=messages,
@@ -180,15 +237,22 @@ class ChatEngine:
                 max_tokens=settings.chat_max_tokens,
                 stream=True
             )
-            
+
             full_response = ""
             async for chunk in stream:
+                if cancel_signal.is_set():
+                    break
                 if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    yield content
-            
-            # Create assistant message
+                    delta = chunk.choices[0].delta.content
+                    full_response += delta
+                    yield {"type": "chat.token", "conversation_id": conversation.conversation_id, "delta": delta}
+
+            if cancel_signal.is_set():
+                yield {"type": "chat.final", "conversation_id": conversation.conversation_id, "message": {"content": "Cancelled.", "role": MessageRole.ASSISTANT.value}}
+                cancel_signal.clear()
+                return
+
+            # Persist assistant turn
             assistant_message = ChatMessage(
                 conversation_id=conversation.conversation_id,
                 role=MessageRole.ASSISTANT,
@@ -196,18 +260,29 @@ class ChatEngine:
                 message_type=MessageType.TEXT,
                 context_used={"context_window": request.context_window}
             )
-            
-            # Add to conversation and memory
             conversation.add_message(assistant_message)
             await self.memory_manager.update_from_message(assistant_message, user_id)
-            await self._maybe_create_rolling_summary(conversation)
-            
-            # Store conversation
+
+            # Rolling summary
+            created = await self._maybe_create_rolling_summary(conversation)
+            if created:
+                yield {"type": "memory.summary_created", "conversation_id": conversation.conversation_id}
+
+            # Store
             self.conversations[conversation.conversation_id] = conversation
-            
+
+            # Suggestions and final
+            suggestions = await self._generate_suggestions(conversation, full_response)
+            yield {
+                "type": "chat.final",
+                "conversation_id": conversation.conversation_id,
+                "message": {"content": full_response, "role": MessageRole.ASSISTANT.value},
+                "suggestions": suggestions
+            }
+
         except Exception as e:
             logger.error("Failed to stream message", error=str(e))
-            yield f"Error: {str(e)}"
+            yield {"type": "error", "message": str(e)}
     
     async def process_conversational_message(
         self,
@@ -688,12 +763,14 @@ class ChatEngine:
 
         return context
 
-    async def _maybe_create_rolling_summary(self, conversation: Conversation):
-        """Create a rolling summary after every ~10 turns and store it as conversation-level memory"""
+    async def _maybe_create_rolling_summary(self, conversation: Conversation) -> bool:
+        """Create a rolling summary after every ~10 turns and store it as conversation-level memory.
+        Returns True if a summary was created this turn.
+        """
         conv_id = conversation.conversation_id
         self._turn_counters[conv_id] = self._turn_counters.get(conv_id, 0) + 1
         if self._turn_counters[conv_id] < 10:
-            return
+            return False
         # Reset counter
         self._turn_counters[conv_id] = 0
         try:
@@ -718,8 +795,10 @@ class ChatEngine:
                 user_id=conversation.user_id,
                 memory_type="conversation"
             )
+            return True
         except Exception as e:
             logger.warning("Failed to create rolling summary", error=str(e))
+        return False
     
     async def _needs_research(
         self,
@@ -926,6 +1005,12 @@ class ChatEngine:
         topics = context.get("conversation_metadata", {}).get("topics")
         if topics:
             system_lines.append("\nTOPICS: " + ", ".join(topics[:10]))
+
+        # RESEARCH NOTES (if present)
+        research_notes = context.get("research_notes")
+        if research_notes:
+            system_lines.append("\nRESEARCH NOTES:")
+            system_lines.append(research_notes[:800])
 
         system_prompt = "\n".join(system_lines)
         messages.append({"role": "system", "content": system_prompt})
@@ -1136,3 +1221,9 @@ Provide 3 short, specific questions that would naturally continue the conversati
             await self.memory_manager.clear_short_term_memory(conversation_id)
             return True
         return False
+
+    async def cancel(self, conversation_id: str) -> None:
+        """Cancel in-flight generation for the given conversation."""
+        signal = self._cancel_signals.get(conversation_id)
+        if signal:
+            signal.set()
