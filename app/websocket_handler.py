@@ -35,6 +35,13 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections[connection_id] = websocket
         
+        # Try to read business_id from websocket scope if available
+        business_id = None
+        try:
+            business_id = websocket.scope.get("state", {}).get("business_id")
+        except Exception:
+            business_id = None
+
         # Ensure a stable user_id for this connection
         if not user_id:
             import uuid
@@ -52,7 +59,7 @@ class ConnectionManager:
             connection_id,
             WebSocketMessage(
                 type="session_info",
-                data={"user_id": user_id, "connection_id": connection_id}
+                data={"user_id": user_id, "business_id": business_id, "connection_id": connection_id}
             )
         )
         

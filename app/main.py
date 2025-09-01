@@ -497,16 +497,22 @@ async def get_memory_stats(user_id: Optional[str] = Query(None)) -> Dict[str, An
 async def websocket_chat(
     websocket: WebSocket,
     connection_id: str,
-    user_id: Optional[str] = Query(None)
+    user_id: Optional[str] = Query(None),
+    business_id: Optional[str] = Query(None)
 ):
     """WebSocket endpoint for real-time chat"""
     # Fallback to query param if path param missing, ensure we read from WS query params
     try:
         qp = websocket.query_params
         qp_user = qp.get("user_id") if hasattr(qp, "get") else None
+        qp_business = qp.get("business_id") if hasattr(qp, "get") else None
         user_id = user_id or qp_user
+        business_id = business_id or qp_business
     except Exception:
         pass
+    # Extend session: pass business_id via headers scope for later if needed
+    websocket.scope.setdefault("state", {})
+    websocket.scope["state"]["business_id"] = business_id
     await websocket_endpoint(websocket, connection_id, user_id)
 
 

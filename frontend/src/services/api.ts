@@ -9,6 +9,7 @@ export interface ChatMessage {
   message: string;
   conversation_id?: string;
   user_id?: string;
+  business_id?: string;
   use_web_search?: boolean;
   stream?: boolean;
   model?: string;
@@ -231,15 +232,18 @@ export class WebSocketService {
   private ws: WebSocket | null = null;
   private connectionId: string;
   private userId: string;
+  private businessId: string;
   private messageHandlers: Map<string, (data: any) => void> = new Map();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
 
-  constructor(userId?: string) {
+  constructor(userId?: string, businessId?: string) {
     this.connectionId = this.generateConnectionId();
     // Ensure we always have a user_id for dual context
     this.userId = this.getOrCreateUserId(userId);
+    // Ensure we always have a business_id for scoping
+    this.businessId = this.getOrCreateBusinessId(businessId);
   }
 
   /**
@@ -265,6 +269,22 @@ export class WebSocketService {
     return anonUserId;
   }
 
+  /**
+   * Get or create a persistent business ID
+   */
+  private getOrCreateBusinessId(providedBusinessId?: string): string {
+    if (providedBusinessId) {
+      localStorage.setItem('businessId', providedBusinessId);
+      return providedBusinessId;
+    }
+    const storedBusinessId = localStorage.getItem('businessId');
+    if (storedBusinessId) {
+      return storedBusinessId;
+    }
+    // Business ID can be optional; keep empty string if not set
+    return '';
+  }
+
   private generateConnectionId(): string {
     return `conn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
@@ -275,7 +295,10 @@ export class WebSocketService {
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       // Always include user_id for dual context
-      const wsUrl = `${WS_BASE_URL}/ws/chat/${this.connectionId}?user_id=${this.userId}`;
+      const params = new URLSearchParams();
+      if (this.userId) params.set('user_id', this.userId);
+      if (this.businessId) params.set('business_id', this.businessId);
+      const wsUrl = `${WS_BASE_URL}/ws/chat/${this.connectionId}?${params.toString()}`;
       
       try {
         this.ws = new WebSocket(wsUrl);
@@ -319,11 +342,16 @@ export class WebSocketService {
     
     // Handle session info to update user_id if needed
     if (type === 'session_info') {
-      const { user_id } = data;
+      const { user_id, business_id } = data;
       if (user_id && user_id !== this.userId) {
         this.userId = user_id;
         localStorage.setItem('userId', user_id);
         console.log('Updated user ID from server:', user_id);
+      }
+      if (typeof business_id === 'string' && business_id !== this.businessId) {
+        this.businessId = business_id;
+        localStorage.setItem('businessId', business_id);
+        console.log('Updated business ID from server:', business_id);
       }
     }
     
@@ -387,6 +415,7 @@ export class WebSocketService {
       conversation_id: finalConversationId,
       stream,
       user_id: this.userId,
+      business_id: this.businessId,
     });
     
     return finalConversationId;  // Return for UI to track

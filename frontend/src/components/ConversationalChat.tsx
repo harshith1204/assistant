@@ -81,9 +81,13 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Business and User context
+  const [businessId, setBusinessId] = useState<string>(() => localStorage.getItem('businessId') || '');
+  const [effectiveUserId, setEffectiveUserId] = useState<string | undefined>(userId || localStorage.getItem('userId') || undefined);
+
   // Initialize WebSocket connection
   useEffect(() => {
-    const ws = new WebSocketService(userId);
+    const ws = new WebSocketService(effectiveUserId, businessId);
     wsRef.current = ws;
 
     // Set up message handlers
@@ -103,7 +107,13 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     return () => {
       ws.disconnect();
     };
-  }, [userId]);
+  }, [effectiveUserId, businessId]);
+
+  // Keep localStorage in sync when IDs change
+  useEffect(() => {
+    if (effectiveUserId) localStorage.setItem('userId', effectiveUserId);
+    if (businessId !== undefined) localStorage.setItem('businessId', businessId);
+  }, [effectiveUserId, businessId]);
 
   const handleConversationalUpdate = (update: ConversationalUpdate) => {
     console.log('Conversational update:', update);
@@ -319,6 +329,20 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
             AI Assistant
           </CardTitle>
           <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2">
+              <Input
+                value={businessId}
+                onChange={(e) => setBusinessId(e.target.value)}
+                placeholder="Business ID"
+                className="w-40"
+              />
+              <Input
+                value={effectiveUserId || ''}
+                onChange={(e) => setEffectiveUserId(e.target.value || undefined)}
+                placeholder="User ID"
+                className="w-40"
+              />
+            </div>
             {isConnected ? (
               <Badge variant="default" className="bg-green-500">
                 <CheckCircle className="w-3 h-3 mr-1" />
