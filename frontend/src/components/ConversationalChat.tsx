@@ -73,7 +73,7 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
   const [isConnected, setIsConnected] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [currentAction, setCurrentAction] = useState<string | null>(null);
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(() => localStorage.getItem('conversationId'));
   const [waitingFor, setWaitingFor] = useState<string | null>(null);
   const [actionProgress, setActionProgress] = useState<number>(0);
   
@@ -85,6 +85,11 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
   const [businessId, setBusinessId] = useState<string>(() => localStorage.getItem('businessId') || '');
   const [effectiveUserId, setEffectiveUserId] = useState<string | undefined>(userId || localStorage.getItem('userId') || undefined);
 
+  // Helper to generate a stable conversation ID (not tied to websocket connection)
+  const generateConversationId = useCallback(() => {
+    return `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }, []);
+
   // Initialize WebSocket connection
   useEffect(() => {
     const ws = new WebSocketService(effectiveUserId, businessId);
@@ -93,7 +98,15 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     // Set up message handlers
     ws.on('connected', (data) => {
       setIsConnected(true);
-      setConversationId(data.connection_id);
+      // Do NOT use transient websocket connection_id as conversation_id.
+      // If no existing conversationId, create one and persist.
+      setConversationId((prev) => {
+        const existing = prev || localStorage.getItem('conversationId');
+        if (existing) return existing;
+        const fresh = generateConversationId();
+        localStorage.setItem('conversationId', fresh);
+        return fresh;
+      });
       addSystemMessage('Connected to assistant. How can I help you today?');
     });
 
@@ -114,6 +127,13 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     if (effectiveUserId) localStorage.setItem('userId', effectiveUserId);
     if (businessId !== undefined) localStorage.setItem('businessId', businessId);
   }, [effectiveUserId, businessId]);
+
+  // Persist conversationId across reloads
+  useEffect(() => {
+    if (conversationId) {
+      localStorage.setItem('conversationId', conversationId);
+    }
+  }, [conversationId]);
 
   const handleConversationalUpdate = (update: ConversationalUpdate) => {
     console.log('Conversational update:', update);
@@ -259,10 +279,18 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     setIsTyping(true);
     setWaitingFor(null);
 
+    // Ensure we have a stable conversationId
+    let finalConversationId = conversationId;
+    if (!finalConversationId) {
+      finalConversationId = generateConversationId();
+      setConversationId(finalConversationId);
+      localStorage.setItem('conversationId', finalConversationId);
+    }
+
     // Send via WebSocket with conversational flag
     wsRef.current.send('chat', {
       message: input,
-      conversation_id: conversationId,
+      conversation_id: finalConversationId,
       conversational: true,
       stream: true
     });
