@@ -73,10 +73,22 @@ class ApiService {
    * Send a chat message
    */
   async sendChatMessage(message: ChatMessage): Promise<ChatResponse> {
+    // Ensure a stable user_id for long-term personalization
+    let userId = message.user_id || localStorage.getItem('userId') || undefined;
+    if (!userId) {
+      userId = `anon_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      localStorage.setItem('userId', userId);
+    }
+
+    const payload = {
+      ...message,
+      user_id: userId,
+    };
+
     const response = await fetch(`${API_BASE_URL}/chat/message`, {
       method: 'POST',
       headers: this.headers,
-      body: JSON.stringify(message),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {

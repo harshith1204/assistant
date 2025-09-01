@@ -359,6 +359,24 @@ class MemoryManager:
                 metadata["research_brief_id"] = message.research_brief_id
                 content += f" [Research Brief: {message.research_brief_id}]"
             
+            # Explicit remember/forget handling for profile facts
+            if message.role == MessageRole.USER and user_id:
+                msg_lower = message.content.lower()
+                # Patterns like: remember my name is John, my name is John, call me John
+                import re
+                name_match = re.search(r"\b(my name is|call me)\s+([A-Za-z][A-Za-z\-\s']{1,40})", message.content, re.IGNORECASE)
+                if name_match:
+                    name_val = name_match.group(2).strip()
+                    await self.set_profile_fact(user_id, "Preferred name", name_val)
+                pref_match = re.search(r"\b(remember|save)\s+that\s+(i\s+)?(like|prefer|don't like|dislike)\s+(.+)$", msg_lower)
+                if pref_match:
+                    raw_pref = message.content[pref_match.start(4):].strip()
+                    await self.set_profile_fact(user_id, "Preference", raw_pref)
+                tz_match = re.search(r"\b(time ?zone|timezone)\s+(is|:)?\s*([A-Za-z_\-/+0-9]{2,32})", message.content, re.IGNORECASE)
+                if tz_match:
+                    tz_val = tz_match.group(3).strip()
+                    await self.set_profile_fact(user_id, "Timezone", tz_val)
+
             # Add to memory
             await self.add_to_memory(
                 conversation_id=message.conversation_id,

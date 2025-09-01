@@ -62,7 +62,7 @@ class ChatEngine:
             conversation_id = request.conversation_id or str(uuid.uuid4())
             conversation_id, user_id = self.memory_manager.ensure_dual_context(
                 conversation_id,
-                user_id
+                request.user_id or user_id
             )
             
             # Get or create conversation with both IDs
