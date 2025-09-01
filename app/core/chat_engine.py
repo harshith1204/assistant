@@ -137,8 +137,9 @@ class ChatEngine:
         request: ChatRequest,
         user_id: Optional[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Stream typed events over a single WebSocket loop."""
+        """Stream typed events over a single WebSocket loop - 5-stage FSM pipeline."""
         try:
+            # ===== STAGE 1: RECEIVE & LOG =====
             # Ensure dual context
             conversation_id = request.conversation_id or str(uuid.uuid4())
             conversation_id, user_id = self.memory_manager.ensure_dual_context(
@@ -164,18 +165,18 @@ class ChatEngine:
                 message_type=MessageType.TEXT
             )
 
-            # Add to conversation and memory
+            # Add to conversation and memory (with write gates)
             conversation.add_message(user_message)
             await self.memory_manager.update_from_message(user_message, user_id)
 
-            # Prepare context
+            # Load context (profile + rolling summary + ranked memories)
             context = await self._prepare_context(
                 conversation,
                 request,
                 user_id
             )
 
-            # Emit memory.used
+            # Emit memory.used event
             def _extract_line(m: Dict[str, Any]) -> str:
                 if isinstance(m, dict):
                     return (m.get("memory") or m.get("content") or str(m)).strip()
@@ -191,13 +192,65 @@ class ChatEngine:
                 })
             yield {"type": "memory.used", "conversation_id": conversation.conversation_id, "items": memory_used}
 
-            # Research decision
+            # ===== STAGE 2: UNDERSTAND INTENT =====
+            from app.core.intent import IntentDetector
+            intent_detector = IntentDetector()
+            intent_result = await intent_detector.detect_intent(request.message, context)
+            intent = intent_result.get("label", "general")
+            confidence = intent_result.get("confidence", 0.5)
+            entities = intent_result.get("entities", {})
+
+            # Low confidence - request clarification
+            if confidence < 0.5 and not request.skip_clarification:
+                yield {
+                    "type": "clarification_needed",
+                    "conversation_id": conversation.conversation_id,
+                    "question": intent_result.get("clarification_question", "Could you please clarify what you'd like me to help with?"),
+                    "confidence": confidence,
+                    "detected_intent": intent
+                }
+                return
+
+            # ===== STAGE 3: PLAN (routing policy) =====
+            routing_strategy = self._determine_routing_strategy(
+                intent, confidence, entities, request, context
+            )
+
+            # ===== STAGE 4: EXECUTE =====
             research_notes: Optional[str] = None
-            needs_research = await self._needs_research(request.message, context)
-            if needs_research and request.use_web_search and not cancel_signal.is_set():
+            
+            # Handle profile update intent
+            if intent == "profile_update" and entities.get("profile_facts"):
+                for fact in entities.get("profile_facts", []):
+                    await self.memory_manager.set_profile_fact(
+                        user_id, fact["key"], fact["value"], fact.get("priority", 50)
+                    )
+                    yield {
+                        "type": "memory.written",
+                        "level": "profile",
+                        "key": fact["key"],
+                        "value": fact["value"]
+                    }
+                # Confirm and return
+                yield {
+                    "type": "chat.final",
+                    "conversation_id": conversation.conversation_id,
+                    "message": {"content": "I've updated your profile with the information you provided.", "role": MessageRole.ASSISTANT.value}
+                }
+                return
+
+            # Research-first strategy
+            if routing_strategy == "research-first" and not cancel_signal.is_set():
                 yield {"type": "research.started", "conversation_id": conversation.conversation_id}
                 try:
                     research_request = ResearchRequest(query=request.message, max_sources=15, deep_dive=True)
+                    # Stream research progress
+                    async for chunk in self._stream_research(research_request):
+                        yield {
+                            "type": "research.chunk",
+                            "conversation_id": conversation.conversation_id,
+                            "data": chunk
+                        }
                     brief = await self.research_engine.run_research(research_request)
                     research_notes = await self._format_research_conversationally(brief)
                     yield {
@@ -208,15 +261,6 @@ class ChatEngine:
                         "findings": len(brief.findings),
                         "ideas": len(brief.ideas)
                     }
-                    research_message = ChatMessage(
-                        conversation_id=conversation.conversation_id,
-                        role=MessageRole.ASSISTANT,
-                        content=research_notes,
-                        message_type=MessageType.RESEARCH_RESULT,
-                        research_brief_id=brief.brief_id
-                    )
-                    conversation.add_message(research_message)
-                    await self.memory_manager.update_from_message(research_message, user_id)
                     context["research_notes"] = research_notes
                 except Exception as e:
                     logger.error("Research stage failed", error=str(e))
@@ -226,7 +270,7 @@ class ChatEngine:
                 yield {"type": "chat.final", "conversation_id": conversation.conversation_id, "message": {"content": "Cancelled.", "role": MessageRole.ASSISTANT.value}}
                 return
 
-            # LLM messages
+            # Generate response with enhanced context
             messages = await self._prepare_llm_messages(conversation, request.message, context)
 
             # Stream generation
@@ -252,32 +296,42 @@ class ChatEngine:
                 cancel_signal.clear()
                 return
 
-            # Persist assistant turn
+            # ===== STAGE 5: COMPLETE =====
+            # Persist assistant turn (with write gates)
             assistant_message = ChatMessage(
                 conversation_id=conversation.conversation_id,
                 role=MessageRole.ASSISTANT,
                 content=full_response,
                 message_type=MessageType.TEXT,
-                context_used={"context_window": request.context_window}
+                context_used={"context_window": request.context_window, "intent": intent}
             )
             conversation.add_message(assistant_message)
-            await self.memory_manager.update_from_message(assistant_message, user_id)
+            
+            # Check for high-signal facts to write
+            high_signal_facts = await self._extract_high_signal_facts(full_response, entities)
+            if high_signal_facts:
+                await self.memory_manager.update_from_message(assistant_message, user_id)
+                yield {"type": "memory.written", "level": "user", "facts": len(high_signal_facts)}
 
-            # Rolling summary
+            # Rolling summary every N turns
             created = await self._maybe_create_rolling_summary(conversation)
             if created:
                 yield {"type": "memory.summary_created", "conversation_id": conversation.conversation_id}
 
-            # Store
+            # Store conversation
             self.conversations[conversation.conversation_id] = conversation
 
-            # Suggestions and final
+            # Generate suggestions
             suggestions = await self._generate_suggestions(conversation, full_response)
+            
+            # Final event with complete message
             yield {
                 "type": "chat.final",
                 "conversation_id": conversation.conversation_id,
                 "message": {"content": full_response, "role": MessageRole.ASSISTANT.value},
-                "suggestions": suggestions
+                "suggestions": suggestions,
+                "intent": intent,
+                "confidence": confidence
             }
 
         except Exception as e:
@@ -964,58 +1018,29 @@ class ChatEngine:
         current_message: str,
         context: Dict[str, Any]
     ) -> List[Dict[str, str]]:
-        """Prepare messages for LLM"""
+        """Prepare messages for LLM using token-tight scaffold"""
         messages = []
-
-        # Structured system prompt scaffold
-        def _extract_line(m: Dict[str, Any]) -> str:
-            if isinstance(m, dict):
-                return m.get("memory") or m.get("content") or str(m)
-            return str(m)
-
-        system_lines: List[str] = []
-        system_lines.append(
-            "You are an intelligent assistant with research capabilities and long-term memory."
-        )
-        system_lines.append(
-            "Be helpful, accurate, concise, and personalize using the provided profile and context."
-        )
-
-        # PROFILE
-        profile = context.get("profile", [])
-        if profile:
-            system_lines.append("\nPROFILE:")
-            for m in profile[:8]:
-                system_lines.append(f"- {_extract_line(m)[:200]}")
-
-        # RECENT SUMMARY
-        summary_text = context.get("conversation_summary")
-        if summary_text:
-            system_lines.append("\nRECENT SUMMARY:")
-            system_lines.append(summary_text[:800])
-
-        # LONG-TERM FACTS (ranked)
-        ranked = context.get("ranked_memories", [])
-        if ranked:
-            system_lines.append("\nLONG-TERM FACTS:")
-            for m in ranked[:5]:
-                system_lines.append(f"- {_extract_line(m)[:200]}")
-
-        # Topics/Entities
-        topics = context.get("conversation_metadata", {}).get("topics")
-        if topics:
-            system_lines.append("\nTOPICS: " + ", ".join(topics[:10]))
-
-        # RESEARCH NOTES (if present)
+        
+        # Use the synthesis module to build the structured prompt
+        from app.core.synthesis import ResearchSynthesizer
+        synthesizer = ResearchSynthesizer()
+        
+        # Get intent and entities from context if available
+        intent = context.get("intent", "general")
+        entities = context.get("entities", {})
         research_notes = context.get("research_notes")
-        if research_notes:
-            system_lines.append("\nRESEARCH NOTES:")
-            system_lines.append(research_notes[:800])
-
-        system_prompt = "\n".join(system_lines)
+        
+        # Build the token-tight prompt scaffold
+        system_prompt = synthesizer.build_prompt(
+            context=context,
+            intent=intent,
+            entities=entities,
+            research_notes=research_notes
+        )
+        
         messages.append({"role": "system", "content": system_prompt})
         
-        # Add recent messages
+        # Add recent messages (last 5)
         for msg in context.get("recent_messages", [])[-5:]:
             if msg["role"] != "system":
                 messages.append({
@@ -1227,3 +1252,75 @@ Provide 3 short, specific questions that would naturally continue the conversati
         signal = self._cancel_signals.get(conversation_id)
         if signal:
             signal.set()
+    
+    def _determine_routing_strategy(
+        self,
+        intent: str,
+        confidence: float,
+        entities: Dict[str, Any],
+        request: ChatRequest,
+        context: Dict[str, Any]
+    ) -> str:
+        """Determine routing strategy based on intent and context"""
+        # Explicit research request
+        if request.use_web_search or intent == "research":
+            return "research-first"
+        
+        # Profile update intent
+        if intent == "profile_update":
+            return "profile-update"
+        
+        # Check for research indicators in message
+        research_keywords = [
+            "research", "find out", "look up", "search for",
+            "what is", "how does", "analyze", "investigate",
+            "tell me about", "explain", "market analysis",
+            "competitor", "pricing", "trends", "statistics"
+        ]
+        message_lower = request.message.lower()
+        if any(keyword in message_lower for keyword in research_keywords):
+            return "research-first"
+        
+        # Default to direct answer
+        return "direct-answer"
+    
+    async def _stream_research(self, research_request: ResearchRequest) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream research progress updates"""
+        # This is a placeholder - actual implementation would stream from research_engine
+        yield {"status": "searching", "sources_found": 0}
+        await asyncio.sleep(0.5)
+        yield {"status": "analyzing", "sources_found": 5}
+        await asyncio.sleep(0.5)
+        yield {"status": "synthesizing", "sources_found": 10}
+    
+    async def _extract_high_signal_facts(
+        self,
+        content: str,
+        entities: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        """Extract high-signal facts worth persisting to long-term memory"""
+        facts = []
+        
+        # Look for explicit facts patterns
+        fact_patterns = [
+            r"I am (.+)",
+            r"My (.+) is (.+)",
+            r"I prefer (.+)",
+            r"I work at (.+)",
+            r"I live in (.+)",
+            r"My goal is (.+)"
+        ]
+        
+        content_lower = content.lower()
+        for pattern in fact_patterns:
+            import re
+            matches = re.findall(pattern, content_lower)
+            for match in matches:
+                facts.append({"type": "extracted", "content": match})
+        
+        # Add entity-based facts
+        if entities.get("profile_facts"):
+            for fact in entities["profile_facts"]:
+                facts.append({"type": "profile", "key": fact["key"], "value": fact["value"]})
+        
+        return facts
