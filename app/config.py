@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     crm_auth_token: Optional[str] = Field(None, env="CRM_AUTH_TOKEN")
     
     # PMS Configuration
-    pms_base_url: str = Field("https://stage-api.simpo.ai/pms", env="PMS_BASE_URL")
+    pms_base_url: str = Field("https://stage-project.simpo.ai", env="PMS_BASE_URL")
     pms_api_key: Optional[str] = Field(None, env="PMS_API_KEY")
     pms_auth_token: Optional[str] = Field(None, env="PMS_AUTH_TOKEN")
     
