@@ -93,6 +93,7 @@ class ChatRequest(BaseModel):
     use_long_term_memory: bool = Field(True, description="Use long-term memory")
     use_web_search: bool = Field(True, description="Allow web search for research")
     stream: bool = Field(False, description="Stream response")
+    skip_clarification: bool = Field(False, description="Skip clarification questions")
 
 
 class ChatResponse(BaseModel):

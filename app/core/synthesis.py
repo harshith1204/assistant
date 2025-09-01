@@ -334,3 +334,100 @@ Write an executive summary."""
         
         overlap = len(text_words & source_words) / len(text_words)
         return min(overlap, 1.0)
+    
+    def build_prompt(
+        self,
+        context: Dict[str, Any],
+        intent: str,
+        entities: Dict[str, Any],
+        research_notes: Optional[str] = None
+    ) -> str:
+        """Build token-tight prompt scaffold for chat generation
+        
+        Structure:
+        - SYSTEM: Role + safety
+        - PROFILE: ≤ 8 short lines
+        - RECENT SUMMARY: ≤ 120 tokens
+        - LONG-TERM FACTS: 5-7 single-line bullets
+        - CURRENT TASK: Intent + entities
+        - RESEARCH NOTES: If available (≤ 150 tokens + citations)
+        """
+        sections = []
+        
+        # SYSTEM section
+        sections.append("SYSTEM:")
+        sections.append("- You are an intelligent assistant with research capabilities and long-term memory.")
+        sections.append("- Be helpful, accurate, concise, and personalize using the provided profile and context.")
+        sections.append("")
+        
+        # PROFILE section (≤ 8 lines)
+        profile = context.get("profile", [])
+        if profile:
+            sections.append("PROFILE:")
+            for item in profile[:8]:
+                # Extract clean line from profile item
+                if isinstance(item, dict):
+                    line = item.get("memory") or item.get("content") or str(item)
+                else:
+                    line = str(item)
+                # Truncate to keep it short
+                if len(line) > 80:
+                    line = line[:77] + "..."
+                sections.append(f"- {line}")
+            sections.append("")
+        
+        # RECENT SUMMARY section (≤ 120 tokens ~480 chars)
+        summary = context.get("conversation_summary")
+        if summary:
+            sections.append("RECENT SUMMARY:")
+            if len(summary) > 480:
+                summary = summary[:477] + "..."
+            sections.append(summary)
+            sections.append("")
+        
+        # LONG-TERM FACTS section (5-7 bullets)
+        memories = context.get("ranked_memories", [])
+        if memories:
+            sections.append("LONG-TERM FACTS:")
+            for mem in memories[:7]:
+                if isinstance(mem, dict):
+                    fact = mem.get("memory") or mem.get("content") or str(mem)
+                else:
+                    fact = str(mem)
+                # Single line bullet
+                if len(fact) > 100:
+                    fact = fact[:97] + "..."
+                sections.append(f"- {fact}")
+            sections.append("")
+        
+        # CURRENT TASK section
+        sections.append("CURRENT TASK:")
+        sections.append(f"- Intent: {intent}")
+        if entities:
+            # Format entities compactly
+            entity_parts = []
+            for key, value in entities.items():
+                if value:
+                    if isinstance(value, list):
+                        entity_parts.append(f"{key}: {', '.join(str(v) for v in value[:3])}")
+                    else:
+                        entity_parts.append(f"{key}: {str(value)[:50]}")
+            if entity_parts:
+                sections.append(f"- Entities: [{', '.join(entity_parts)}]")
+        sections.append("")
+        
+        # RESEARCH NOTES section (if available)
+        if research_notes:
+            sections.append("RESEARCH NOTES:")
+            # Limit to ~150 tokens (600 chars) plus citations
+            if len(research_notes) > 600:
+                # Find a good break point
+                cutoff = research_notes[:600].rfind(". ")
+                if cutoff > 400:
+                    research_notes = research_notes[:cutoff + 1]
+                else:
+                    research_notes = research_notes[:597] + "..."
+            sections.append(research_notes)
+            sections.append("")
+        
+        return "\n".join(sections)

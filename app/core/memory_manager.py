@@ -7,7 +7,7 @@ import asyncio
 from mem0 import Memory
 import structlog
 from app.config import settings
-from app.chat_models import ConversationContext, ChatMessage, MessageRole
+from app.chat_models import ConversationContext, ChatMessage, MessageRole, MessageType
 import hashlib
 
 logger = structlog.get_logger()
@@ -164,10 +164,12 @@ class MemoryManager:
                     sanitized_meta = self._sanitize_metadata(meta)
                     
                     # Add to Mem0 with user_id for cross-conversation persistence
+                    # Mark this as user-level memory in metadata
+                    sanitized_meta["memory_level"] = "user"
                     mem0_result = await asyncio.to_thread(
                         self.memory.add,
                         content,
-                        user_id=user_id,  # Always use user_id for long-term
+                        user_id=user_id,  # Always use user_id for long-term, NOT conversation_id
                         metadata=sanitized_meta
                     )
                     # Track hash
@@ -176,8 +178,10 @@ class MemoryManager:
             
                 logger.info(
                     "Added to long-term memory",
+                    user_id=user_id,
                     conversation_id=conversation_id,
-                    memory_id=mem0_result.get("id") if isinstance(mem0_result, dict) else None
+                    memory_id=mem0_result.get("id") if isinstance(mem0_result, dict) else None,
+                    memory_type=memory_type
                 )
             
             except Exception as e:
@@ -201,7 +205,7 @@ class MemoryManager:
         limit: int = 5,
         search_scope: str = "both"  # "user", "conversation", or "both"
     ) -> List[Dict[str, Any]]:
-        """Search memories
+        """Search memories with composite ranking
         
         Args:
             query: The search query
@@ -214,12 +218,14 @@ class MemoryManager:
         
         try:
             # Search user-level long-term memories if user_id is provided
+            # IMPORTANT: User memories should be searched across ALL conversations
             if search_scope in ["user", "both"] and user_id:
+                # Search ALL user memories regardless of conversation
                 search_result = await asyncio.to_thread(
                     self.memory.search,
                     query,
-                    user_id=user_id,  # Search user memories
-                    limit=limit
+                    user_id=user_id,  # Search ALL user memories
+                    limit=limit * 3  # Get more for ranking since we'll filter
                 )
                 
                 # Extract results from the response (handles both v1.0 and v1.1 formats)
@@ -255,7 +261,12 @@ class MemoryManager:
                             "memory_level": "conversation"
                         })
             
-            return results
+            # Apply composite ranking
+            ranked_results = self._apply_composite_ranking(
+                results, query, conversation_id, limit
+            )
+            
+            return ranked_results
             
         except Exception as e:
             logger.error("Failed to search memory", error=str(e))
@@ -359,8 +370,15 @@ class MemoryManager:
         message: ChatMessage,
         user_id: Optional[str] = None
     ):
-        """Update memory from a chat message"""
+        """Update memory from a chat message with write gates"""
         try:
+            # Apply write gates to avoid memory spam
+            should_write = self._should_write_to_memory(message)
+            
+            if not should_write:
+                logger.debug("Skipping memory write due to gates", message_id=message.message_id)
+                return
+            
             # Prepare content for memory
             content = f"{message.role.value}: {message.content}"
             
@@ -375,12 +393,16 @@ class MemoryManager:
                 metadata["research_brief_id"] = message.research_brief_id
                 content += f" [Research Brief: {message.research_brief_id}]"
             
+            # Determine memory type based on content and role
+            memory_type = self._determine_memory_type(message, user_id)
+            
             # Add to memory
             await self.add_to_memory(
                 conversation_id=message.conversation_id,
                 content=content,
                 metadata=metadata,
-                user_id=user_id
+                user_id=user_id,
+                memory_type=memory_type
             )
             
             # Extract and store entities/topics for important messages
@@ -579,3 +601,139 @@ class MemoryManager:
         except Exception as e:
             logger.error("Failed to get memory stats", error=str(e))
             return {}
+    
+    def _apply_composite_ranking(
+        self,
+        results: List[Dict[str, Any]],
+        query: str,
+        conversation_id: Optional[str],
+        limit: int
+    ) -> List[Dict[str, Any]]:
+        """Apply composite ranking to search results"""
+        from datetime import datetime
+        import math
+        
+        now = datetime.utcnow()
+        
+        for result in results:
+            # Start with semantic score
+            semantic_score = float(result.get("score", 0.0))
+            
+            # Calculate recency boost
+            metadata = result.get("metadata", {})
+            timestamp = metadata.get("timestamp")
+            try:
+                if timestamp:
+                    # Handle both with and without Z suffix
+                    ts_norm = timestamp.replace("Z", "+00:00") if isinstance(timestamp, str) else None
+                    age_days = (now - datetime.fromisoformat(ts_norm)).total_seconds() / 86400
+                else:
+                    age_days = 365.0
+            except Exception:
+                age_days = 365.0
+            
+            recency_boost = math.exp(-age_days / 30.0)
+            
+            # Apply boosts
+            boost = 0.0
+            
+            # Profile/pinned boost
+            if metadata.get("memory_level") == "profile" or metadata.get("pinned") is True:
+                boost += 0.2
+            
+            # Conversation match boost
+            if metadata.get("conversation_id") == conversation_id:
+                boost += 0.1
+            
+            # Intent/entity boost (if metadata contains relevant entities)
+            if "entities" in metadata:
+                query_lower = query.lower()
+                entities = metadata.get("entities", [])
+                if isinstance(entities, str):
+                    entities = [e.strip() for e in entities.split(",")]
+                if any(entity.lower() in query_lower for entity in entities):
+                    boost += 0.1
+            
+            # Calculate composite score
+            composite_score = 0.6 * semantic_score + 0.3 * recency_boost + boost
+            result["composite_score"] = composite_score
+        
+        # Sort by composite score
+        ranked = sorted(results, key=lambda x: x.get("composite_score", 0), reverse=True)
+        
+        # Return top-k
+        return ranked[:limit]
+    
+    def _should_write_to_memory(self, message: ChatMessage) -> bool:
+        """Determine if a message should be written to memory (write gates)"""
+        content_lower = message.content.lower()
+        
+        # Always write certain types
+        if message.message_type in [MessageType.RESEARCH_RESULT]:
+            return True
+        
+        # Write if explicit memory cues
+        memory_cues = [
+            "remember", "save", "note", "don't forget",
+            "keep in mind", "for future reference"
+        ]
+        if any(cue in content_lower for cue in memory_cues):
+            return True
+        
+        # Write if contains strong entity/value patterns
+        import re
+        strong_patterns = [
+            r"my .+ is",
+            r"i prefer",
+            r"i am",
+            r"i work",
+            r"i live",
+            r"my goal"
+        ]
+        if any(re.search(pattern, content_lower) for pattern in strong_patterns):
+            return True
+        
+        # Skip trivial messages
+        if len(message.content) < 20:
+            return False
+        
+        trivial_patterns = ["ok", "thanks", "yes", "no", "sure", "got it"]
+        if content_lower.strip() in trivial_patterns:
+            return False
+        
+        # Default: write for user messages, selective for assistant
+        if message.role == MessageRole.USER:
+            return True
+        
+        # For assistant messages, only write if substantial
+        return len(message.content) > 100
+    
+    def _determine_memory_type(self, message: ChatMessage, user_id: Optional[str]) -> str:
+        """Determine whether to store in user, conversation, or both"""
+        content_lower = message.content.lower()
+        
+        # Profile/personal info goes to user memory
+        if any(phrase in content_lower for phrase in ["i am", "my name", "i prefer", "i work", "i live"]):
+            return "user" if user_id else "conversation"
+        
+        # Research results go to both
+        if message.message_type == MessageType.RESEARCH_RESULT:
+            return "both"
+        
+        # User messages with important info should go to user level
+        if message.role == MessageRole.USER and len(message.content) > 50:
+            # Check for important patterns
+            important_patterns = [
+                "remember", "don't forget", "keep in mind",
+                "i like", "i love", "i hate", "i need",
+                "allergic", "can't eat", "avoid"
+            ]
+            if any(pattern in content_lower for pattern in important_patterns):
+                return "both" if user_id else "conversation"
+        
+        # Assistant messages with substantial content
+        if message.role == MessageRole.ASSISTANT and len(message.content) > 200:
+            return "both" if user_id else "conversation"
+        
+        # Default: conversation-specific
+        return "conversation"
