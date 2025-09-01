@@ -16,7 +16,7 @@ from app.chat_models import (
 )
 from app.models import ResearchRequest, ResearchBrief
 from app.core.memory_manager import MemoryManager
-from app.core.research_engine import ResearchEngine
+from app.research.service import ResearchService
 from app.core.intent import (
     IntentDetector
 )
@@ -34,7 +34,7 @@ class ChatEngine:
         print(f"🔧 Initializing ChatEngine with model: {settings.llm_model}")
         self.groq_client = AsyncGroq(api_key=settings.groq_api_key)
         self.memory_manager = MemoryManager()
-        self.research_engine = ResearchEngine()
+        self.research_service = ResearchService()
         # Simple intent detection
         self.intent_detector = IntentDetector()
         self.crm_client = CRMClient()
@@ -578,7 +578,15 @@ class ChatEngine:
                 "content": "🔍 Starting research...",
                 "topics": topics
             }
-            research_brief = await self.research_engine.run_research(research_request)
+            research_brief = await self.research_service.research(
+                query=original_message,
+                scope=params.get("scope", []),
+                industry=params.get("industry"),
+                geography=params.get("geography"),
+                max_sources=params.get("max_sources", 15),
+                mode="standard",
+                user_id=user_id
+            )
             yield {
                 "type": "research_progress",
                 "content": f"Found {research_brief.total_sources} relevant sources",
@@ -593,7 +601,9 @@ class ChatEngine:
                 "ideas_count": len(research_brief.ideas),
                 "metadata": {
                     "sources": research_brief.total_sources,
-                    "confidence": research_brief.average_confidence
+                    "confidence": getattr(research_brief, 'research_quality_score', 0.8),
+                    "business_type": getattr(research_brief, 'business_type', None),
+                    "strategic_priorities": getattr(research_brief, 'strategic_priorities', [])
                 }
             }
             research_message = ChatMessage(
