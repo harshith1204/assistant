@@ -5,6 +5,7 @@ import asyncio
 import uuid
 from typing import Dict, Any, List, Optional, AsyncGenerator
 from datetime import datetime
+import math
 from groq import AsyncGroq
 import structlog
 
@@ -38,6 +39,7 @@ class ChatEngine:
         self.crm_client = CRMClient()
         self.pms_client = PMSClient()
         self.conversations: Dict[str, Conversation] = {}
+        self._turn_counters: Dict[str, int] = {}
         
         # Action handlers mapping (for conversational routing)
         self.action_handlers = {
@@ -60,7 +62,7 @@ class ChatEngine:
             conversation_id = request.conversation_id or str(uuid.uuid4())
             conversation_id, user_id = self.memory_manager.ensure_dual_context(
                 conversation_id,
-                user_id
+                request.user_id or user_id
             )
             
             # Get or create conversation with both IDs
@@ -119,6 +121,9 @@ class ChatEngine:
             
             # Store conversation
             self.conversations[conversation.conversation_id] = conversation
+            
+            # Rolling summary after completed assistant turn
+            await self._maybe_create_rolling_summary(conversation)
             
             return response
             
@@ -195,6 +200,7 @@ class ChatEngine:
             # Add to conversation and memory
             conversation.add_message(assistant_message)
             await self.memory_manager.update_from_message(assistant_message, user_id)
+            await self._maybe_create_rolling_summary(conversation)
             
             # Store conversation
             self.conversations[conversation.conversation_id] = conversation
@@ -602,7 +608,7 @@ class ChatEngine:
         user_id: Optional[str]
     ) -> Dict[str, Any]:
         """Prepare context for message processing"""
-        context = {}
+        context: Dict[str, Any] = {}
         
         # Get conversation context
         conv_context = await self.memory_manager.get_conversation_context(
@@ -621,6 +627,12 @@ class ChatEngine:
             for msg in recent_messages
         ]
         
+        # Profile facts (always retrieve if user_id)
+        profile: List[Dict[str, Any]] = []
+        if user_id:
+            profile = await self.memory_manager.get_profile(user_id)
+        context["profile"] = profile
+
         # Search both user and conversation memories if enabled
         if request.use_long_term_memory:
             # Search both user-level and conversation-level memories
@@ -636,6 +648,28 @@ class ChatEngine:
             # Separate memories by level for better context
             context["user_memories"] = [m for m in memories if m.get("memory_level") == "user"]
             context["conversation_memories"] = [m for m in memories if m.get("memory_level") == "conversation"]
+
+            # Composite ranking of memories
+            now = datetime.utcnow()
+            def _score(m: Dict[str, Any]) -> float:
+                meta = m.get("metadata", {}) if isinstance(m, dict) else {}
+                semantic = float(m.get("score", 0.0))
+                ts = meta.get("timestamp")
+                try:
+                    # Support both with and without Z suffix
+                    ts_norm = ts.replace("Z", "+00:00") if isinstance(ts, str) else None
+                    age_days = (now - datetime.fromisoformat(ts_norm)).total_seconds()/86400 if ts_norm else 365.0
+                except Exception:
+                    age_days = 365.0
+                rec = math.exp(-age_days/30.0)
+                boost = 0.0
+                if meta.get("conversation_id") == conversation.conversation_id:
+                    boost += 0.1
+                if meta.get("memory_level") == "profile" or meta.get("pinned") is True:
+                    boost += 0.2
+                return 0.6*semantic + 0.3*rec + boost
+            ranked = sorted(memories, key=_score, reverse=True)
+            context["ranked_memories"] = ranked
         
         # Add conversation metadata
         context["conversation_metadata"] = {
@@ -645,7 +679,47 @@ class ChatEngine:
             "topics": conv_context.topics
         }
         
+        # Include any existing conversation summary from short-term cache if present
+        st = conv_context.short_term or {}
+        summaries = [m for m in st.get("recent_messages", []) if isinstance(m, dict) and m.get("metadata", {}).get("type") == "summary"]
+        if summaries:
+            last = summaries[-1]
+            context["conversation_summary"] = last.get("content")
+
         return context
+
+    async def _maybe_create_rolling_summary(self, conversation: Conversation):
+        """Create a rolling summary after every ~10 turns and store it as conversation-level memory"""
+        conv_id = conversation.conversation_id
+        self._turn_counters[conv_id] = self._turn_counters.get(conv_id, 0) + 1
+        if self._turn_counters[conv_id] < 10:
+            return
+        # Reset counter
+        self._turn_counters[conv_id] = 0
+        try:
+            messages_text = "\n".join([
+                f"{m.role.value}: {m.content}" for m in conversation.messages[-40:]
+            ])
+            prompt = f"Summarize this recent conversation window concisely in 6-8 bullet points:\n\n{messages_text}"
+            response = await self.groq_client.chat.completions.create(
+                model=settings.groq_model,
+                messages=[
+                    {"role": "system", "content": "Create a concise rolling summary"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.4,
+                max_tokens=settings.summary_max_tokens
+            )
+            summary_text = response.choices[0].message.content
+            await self.memory_manager.add_to_memory(
+                conversation_id=conv_id,
+                content=summary_text,
+                metadata={"memory_level": "conversation", "type": "summary", "pinned": True},
+                user_id=conversation.user_id,
+                memory_type="conversation"
+            )
+        except Exception as e:
+            logger.warning("Failed to create rolling summary", error=str(e))
     
     async def _needs_research(
         self,
@@ -813,30 +887,47 @@ class ChatEngine:
     ) -> List[Dict[str, str]]:
         """Prepare messages for LLM"""
         messages = []
-        
-        # System prompt
-        system_prompt = """You are an intelligent assistant with research capabilities and long-term memory.
-You help users with various tasks including research, analysis, planning, and general conversation.
-You have access to conversation history and can remember important information across sessions.
 
-When responding:
-1. Be helpful, accurate, and concise
-2. Use the context and memories provided to give personalized responses
-3. If you reference previous conversations or memories, mention it naturally
-4. For research requests, provide comprehensive, well-structured information
-5. Suggest follow-up questions when appropriate
-"""
-        
-        # Add context to system prompt
-        if context.get("relevant_memories"):
-            system_prompt += "\n\nRelevant memories from previous conversations:\n"
-            for memory in context["relevant_memories"][:3]:
-                system_prompt += f"- {memory.get('memory', '')}\n"
-        
-        if context.get("conversation_metadata", {}).get("topics"):
-            topics = context["conversation_metadata"]["topics"]
-            system_prompt += f"\n\nTopics discussed: {', '.join(topics)}"
-        
+        # Structured system prompt scaffold
+        def _extract_line(m: Dict[str, Any]) -> str:
+            if isinstance(m, dict):
+                return m.get("memory") or m.get("content") or str(m)
+            return str(m)
+
+        system_lines: List[str] = []
+        system_lines.append(
+            "You are an intelligent assistant with research capabilities and long-term memory."
+        )
+        system_lines.append(
+            "Be helpful, accurate, concise, and personalize using the provided profile and context."
+        )
+
+        # PROFILE
+        profile = context.get("profile", [])
+        if profile:
+            system_lines.append("\nPROFILE:")
+            for m in profile[:8]:
+                system_lines.append(f"- {_extract_line(m)[:200]}")
+
+        # RECENT SUMMARY
+        summary_text = context.get("conversation_summary")
+        if summary_text:
+            system_lines.append("\nRECENT SUMMARY:")
+            system_lines.append(summary_text[:800])
+
+        # LONG-TERM FACTS (ranked)
+        ranked = context.get("ranked_memories", [])
+        if ranked:
+            system_lines.append("\nLONG-TERM FACTS:")
+            for m in ranked[:5]:
+                system_lines.append(f"- {_extract_line(m)[:200]}")
+
+        # Topics/Entities
+        topics = context.get("conversation_metadata", {}).get("topics")
+        if topics:
+            system_lines.append("\nTOPICS: " + ", ".join(topics[:10]))
+
+        system_prompt = "\n".join(system_lines)
         messages.append({"role": "system", "content": system_prompt})
         
         # Add recent messages
