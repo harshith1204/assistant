@@ -500,6 +500,13 @@ async def websocket_chat(
     user_id: Optional[str] = Query(None)
 ):
     """WebSocket endpoint for real-time chat"""
+    # Fallback to query param if path param missing, ensure we read from WS query params
+    try:
+        qp = websocket.query_params
+        qp_user = qp.get("user_id") if hasattr(qp, "get") else None
+        user_id = user_id or qp_user
+    except Exception:
+        pass
     await websocket_endpoint(websocket, connection_id, user_id)
 
 
