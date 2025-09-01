@@ -356,10 +356,13 @@ async def global_exception_handler(request, exc):
 
 # Chat API Endpoints
 @app.post("/chat/message", response_model=ChatResponse)
-async def send_chat_message(request: ChatRequest) -> ChatResponse:
+async def send_chat_message(request: ChatRequest, user_id: Optional[str] = Query(None)) -> ChatResponse:
     """Send a chat message and get response"""
     try:
-        response = await chat_engine.process_message(request, user_id=request.user_id)
+        response = await chat_engine.process_message(
+            request,
+            user_id=user_id or request.user_id
+        )
         return response
     except Exception as e:
         logger.error("Chat message failed", error=str(e))
@@ -497,35 +500,15 @@ async def websocket_chat(
     user_id: Optional[str] = Query(None)
 ):
     """WebSocket endpoint for real-time chat"""
+    # Fallback to query param if path param missing, ensure we read from WS query params
+    try:
+        qp = websocket.query_params
+        qp_user = qp.get("user_id") if hasattr(qp, "get") else None
+        user_id = user_id or qp_user
+    except Exception:
+        pass
     await websocket_endpoint(websocket, connection_id, user_id)
 
-
-# Serve chat UI
-@app.get("/chat", response_class=HTMLResponse)
-async def chat_ui():
-    """Serve the chat UI"""
-    try:
-        with open("static/chat.html", "r") as f:
-            return HTMLResponse(content=f.read())
-    except FileNotFoundError:
-        return HTMLResponse(content=get_default_chat_html())
-
-
-def get_default_chat_html():
-    """Get default chat HTML if file not found"""
-    return """<!DOCTYPE html>
-<html>
-<head>
-    <title>Chat Interface</title>
-    <style>body { font-family: Arial; } .container { max-width: 800px; margin: 0 auto; padding: 20px; }</style>
-</head>
-<body>
-    <div class="container">
-        <h1>Chat Interface</h1>
-        <p>Chat interface file not found. Please create static/chat.html</p>
-    </div>
-</body>
-</html>"""
 
 
 if __name__ == "__main__":
