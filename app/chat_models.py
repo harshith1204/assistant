@@ -88,6 +88,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = Field(None, description="Existing conversation ID")
     message: str = Field(..., description="User message")
     user_id: Optional[str] = Field(None, description="User ID for long-term personalization")
+    business_id: Optional[str] = Field(None, description="Business/tenant ID for scoping")
     context_window: int = Field(10, description="Number of previous messages to include")
     use_long_term_memory: bool = Field(True, description="Use long-term memory")
     use_web_search: bool = Field(True, description="Allow web search for research")
