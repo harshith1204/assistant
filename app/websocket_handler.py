@@ -235,24 +235,31 @@ class ConnectionManager:
                 )
             )
             
-            # Stream chunks
+            # Stream events; convert chat.token to legacy stream_chunk for backward compatibility
             full_response = ""
-            async for chunk in self.chat_engine.stream_message(request, user_id):
-                full_response += chunk
-                
-                stream_chunk = StreamChunk(
-                    conversation_id=conversation_id,
-                    content=chunk,
-                    is_final=False
-                )
-                
-                await self.send_message(
-                    connection_id,
-                    WebSocketMessage(
-                        type="stream_chunk",
-                        data=stream_chunk.model_dump()
+            async for event in self.chat_engine.stream_message(request, user_id):
+                et = event.get("type")
+                if et == "chat.token":
+                    delta = event.get("delta", "")
+                    full_response += delta
+                    stream_chunk = StreamChunk(
+                        conversation_id=conversation_id,
+                        content=delta,
+                        is_final=False
                     )
-                )
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(
+                            type="stream_chunk",
+                            data=stream_chunk.model_dump()
+                        )
+                    )
+                else:
+                    # Forward other typed events as-is
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(type=et, data=event)
+                    )
             
             # Send final chunk
             await self.send_message(
@@ -488,13 +495,62 @@ async def websocket_endpoint(
             # Route based on message type
             message_type = data.get("type")
             
-            if message_type == "chat":
+            # New unified dispatcher on a single socket
+            if message_type == "chat.send":
+                payload = data.get("data", {})
+                # Build ChatRequest and forward streaming events 1:1
+                try:
+                    request = ChatRequest(**payload)
+                except Exception:
+                    # Backward compat: treat legacy shape as already ChatRequest-like
+                    request = ChatRequest(**(data.get("data", {})))
+                async for event in manager.chat_engine.stream_message(request, user_id or manager.connection_user.get(connection_id)):
+                    await manager.send_message(
+                        connection_id,
+                        WebSocketMessage(type=event.get("type", "chat.token"), data=event)
+                    )
+            elif message_type == "session.resume":
+                payload = data.get("data", {})
+                manager.connection_user[connection_id] = payload.get("user_id") or user_id or manager.connection_user.get(connection_id)
+                await manager.send_message(
+                    connection_id,
+                    WebSocketMessage(
+                        type="session_info",
+                        data={"user_id": manager.connection_user[connection_id], "connection_id": connection_id}
+                    )
+                )
+            elif message_type == "memory.get":
+                payload = data.get("data", {})
+                items = await manager.chat_engine.memory_manager.search_memory(
+                    query=payload.get("query", "*"),
+                    conversation_id=payload.get("conversation_id"),
+                    user_id=payload.get("user_id") or user_id or manager.connection_user.get(connection_id),
+                    limit=int(payload.get("limit", 8)),
+                    search_scope=payload.get("scope", "both")
+                )
+                await manager.send_message(connection_id, WebSocketMessage(type="memory.snapshot", data={"items": items}))
+            elif message_type == "memory.set":
+                payload = data.get("data", {})
+                await manager.chat_engine.memory_manager.set_profile_fact(
+                    payload.get("user_id") or user_id or manager.connection_user.get(connection_id),
+                    payload["key"],
+                    payload["value"],
+                    payload.get("priority", 50)
+                )
+                await manager.send_message(connection_id, WebSocketMessage(type="memory.written", data={"level": "profile", "key": payload.get("key")}))
+            elif message_type == "agent.cancel":
+                payload = data.get("data", {})
+                if payload and payload.get("conversation_id"):
+                    await manager.chat_engine.cancel(conversation_id=payload["conversation_id"]) 
+            elif message_type == "chat":
+                # Backward compatibility with legacy clients
                 await manager.handle_chat_message(
                     connection_id,
                     data.get("data", {}),
                     user_id
                 )
             elif message_type == "research":
+                # Backward compatibility for research trigger
                 await manager.handle_research_request(
                     connection_id,
                     data.get("data", {}),
