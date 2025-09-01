@@ -492,6 +492,69 @@ async def get_memory_stats(user_id: Optional[str] = Query(None)) -> Dict[str, An
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/chat/memory/debug/{user_id}")
+async def debug_user_memory(
+    user_id: str,
+    conversation_id: Optional[str] = Query(None)
+) -> Dict[str, Any]:
+    """Debug endpoint to view all memories for a user"""
+    try:
+        memory_manager = chat_engine.memory_manager
+        
+        # Get all user memories
+        all_memories = await asyncio.to_thread(
+            memory_manager.memory.get_all,
+            user_id=user_id
+        )
+        
+        # Extract results
+        if isinstance(all_memories, dict) and "results" in all_memories:
+            memories = all_memories["results"]
+        elif isinstance(all_memories, list):
+            memories = all_memories
+        else:
+            memories = []
+        
+        # Get profile
+        profile = await memory_manager.get_profile(user_id)
+        
+        # Search memories if query provided
+        search_results = []
+        if conversation_id:
+            search_results = await memory_manager.search_memory(
+                query="*",  # Get all
+                conversation_id=conversation_id,
+                user_id=user_id,
+                limit=50,
+                search_scope="both"
+            )
+        
+        # Get short-term cache for conversation
+        short_term = {}
+        if conversation_id and conversation_id in memory_manager.short_term_cache:
+            cache_data = memory_manager.short_term_cache[conversation_id]
+            short_term = {
+                "message_count": len(cache_data.get("messages", [])),
+                "recent_messages": cache_data.get("messages", [])[-5:],
+                "timestamp": cache_data.get("timestamp", "").isoformat() if cache_data.get("timestamp") else None
+            }
+        
+        return {
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "total_memories": len(memories),
+            "profile_facts": len(profile),
+            "profile": profile[:10],  # First 10 profile facts
+            "recent_memories": memories[:20],  # Recent 20 memories
+            "search_results": search_results[:10],  # Top 10 search results
+            "short_term_cache": short_term,
+            "active_conversations": list(memory_manager.short_term_cache.keys())
+        }
+    except Exception as e:
+        logger.error("Failed to debug memory", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # WebSocket endpoint
 @app.websocket("/ws/chat/{connection_id}")
 async def websocket_chat(
