@@ -309,19 +309,35 @@ class MemoryManager:
                     # Handle both dict and object formats
                     if isinstance(memory, dict):
                         memory_text = memory.get("memory", "")
-                        meta = memory.get("metadata", {})
+                        meta = memory.get("metadata", {}) or {}
                     else:
                         # Handle object format (if mem0 returns objects)
                         memory_text = getattr(memory, "memory", "")
-                        meta = getattr(memory, "metadata", {})
-                    
-                    # Extract entities (simple approach - can be enhanced with NER)
+                        meta = getattr(memory, "metadata", {}) or {}
+
+                    # Normalize meta values that may be JSON-encoded strings
+                    def _ensure_list(value):
+                        if value is None:
+                            return []
+                        if isinstance(value, list):
+                            return value
+                        if isinstance(value, str):
+                            try:
+                                parsed = json.loads(value)
+                                if isinstance(parsed, list):
+                                    return parsed
+                                return [parsed]
+                            except Exception:
+                                # Comma-separated string fallback
+                                return [v.strip() for v in value.split(",") if v.strip()]
+                        return [value]
+
+                    # Extract entities/topics robustly
                     if "entities" in meta:
-                        entities.update(meta["entities"])
-                    
-                    # Extract topics
+                        entities.update(_ensure_list(meta.get("entities")))
+
                     if "topics" in meta:
-                        topics.update(meta["topics"])
+                        topics.update(_ensure_list(meta.get("topics")))
                 
                 context.long_term = {
                     "total_memories": len(all_memories),
