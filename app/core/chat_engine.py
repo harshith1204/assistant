@@ -775,7 +775,7 @@ class ChatEngine:
                 query=request.message,
                 conversation_id=conversation.conversation_id,
                 user_id=user_id,  # This ensures we get ALL memories for this user
-                limit=10,  # Get more memories to ensure cross-conversation facts are included
+                limit=20,  # Increased from 10 to get more cross-conversation facts
                 search_scope="both"  # Search BOTH user (cross-conversation) and conversation-specific
             )
             context["relevant_memories"] = memories
