@@ -181,7 +181,8 @@ class MemoryManager:
                     user_id=user_id,
                     conversation_id=conversation_id,
                     memory_id=mem0_result.get("id") if isinstance(mem0_result, dict) else None,
-                    memory_type=memory_type
+                    memory_type=memory_type,
+                    content_preview=content[:100]
                 )
             
             except Exception as e:
@@ -216,6 +217,15 @@ class MemoryManager:
         """
         results = []
         
+        logger.info(
+            "Searching memory",
+            query=query[:50],
+            user_id=user_id,
+            conversation_id=conversation_id,
+            search_scope=search_scope,
+            limit=limit
+        )
+        
         try:
             # Search user-level long-term memories if user_id is provided
             # IMPORTANT: User memories should be searched across ALL conversations
@@ -234,6 +244,8 @@ class MemoryManager:
                 else:
                     # Fallback for older format or direct list
                     user_results = search_result if isinstance(search_result, list) else []
+                
+                logger.info(f"Found {len(user_results)} user-level memories for user {user_id}")
                 
                 # Mark these as user-level memories and append one by one
                 for result in user_results:
@@ -688,25 +700,26 @@ class MemoryManager:
             r"i am",
             r"i work",
             r"i live",
-            r"my goal"
+            r"my goal",
+            r"i want",
+            r"i need",
+            r"i like",
+            r"i love"
         ]
         if any(re.search(pattern, content_lower) for pattern in strong_patterns):
             return True
         
-        # Skip trivial messages
-        if len(message.content) < 20:
+        # Skip only very trivial messages
+        trivial_patterns = ["ok", "thanks", "yes", "no", "sure", "got it", "hi", "hello", "bye"]
+        if content_lower.strip() in trivial_patterns and len(message.content) < 10:
             return False
         
-        trivial_patterns = ["ok", "thanks", "yes", "no", "sure", "got it"]
-        if content_lower.strip() in trivial_patterns:
-            return False
-        
-        # Default: write for user messages, selective for assistant
-        if message.role == MessageRole.USER:
+        # More lenient for user messages - store if > 30 chars (was 20)
+        if message.role == MessageRole.USER and len(message.content) > 30:
             return True
         
-        # For assistant messages, only write if substantial
-        return len(message.content) > 100
+        # For assistant messages, store if substantial (lowered from 100 to 50)
+        return len(message.content) > 50
     
     def _determine_memory_type(self, message: ChatMessage, user_id: Optional[str]) -> str:
         """Determine whether to store in user, conversation, or both"""
