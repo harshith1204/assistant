@@ -164,10 +164,12 @@ class MemoryManager:
                     sanitized_meta = self._sanitize_metadata(meta)
                     
                     # Add to Mem0 with user_id for cross-conversation persistence
+                    # Mark this as user-level memory in metadata
+                    sanitized_meta["memory_level"] = "user"
                     mem0_result = await asyncio.to_thread(
                         self.memory.add,
                         content,
-                        user_id=user_id,  # Always use user_id for long-term
+                        user_id=user_id,  # Always use user_id for long-term, NOT conversation_id
                         metadata=sanitized_meta
                     )
                     # Track hash
@@ -176,8 +178,10 @@ class MemoryManager:
             
                 logger.info(
                     "Added to long-term memory",
+                    user_id=user_id,
                     conversation_id=conversation_id,
-                    memory_id=mem0_result.get("id") if isinstance(mem0_result, dict) else None
+                    memory_id=mem0_result.get("id") if isinstance(mem0_result, dict) else None,
+                    memory_type=memory_type
                 )
             
             except Exception as e:
@@ -214,12 +218,14 @@ class MemoryManager:
         
         try:
             # Search user-level long-term memories if user_id is provided
+            # IMPORTANT: User memories should be searched across ALL conversations
             if search_scope in ["user", "both"] and user_id:
+                # Search ALL user memories regardless of conversation
                 search_result = await asyncio.to_thread(
                     self.memory.search,
                     query,
-                    user_id=user_id,  # Search user memories
-                    limit=limit * 2  # Get more for ranking
+                    user_id=user_id,  # Search ALL user memories
+                    limit=limit * 3  # Get more for ranking since we'll filter
                 )
                 
                 # Extract results from the response (handles both v1.0 and v1.1 formats)
@@ -713,6 +719,21 @@ class MemoryManager:
         # Research results go to both
         if message.message_type == MessageType.RESEARCH_RESULT:
             return "both"
+        
+        # User messages with important info should go to user level
+        if message.role == MessageRole.USER and len(message.content) > 50:
+            # Check for important patterns
+            important_patterns = [
+                "remember", "don't forget", "keep in mind",
+                "i like", "i love", "i hate", "i need",
+                "allergic", "can't eat", "avoid"
+            ]
+            if any(pattern in content_lower for pattern in important_patterns):
+                return "both" if user_id else "conversation"
+        
+        # Assistant messages with substantial content
+        if message.role == MessageRole.ASSISTANT and len(message.content) > 200:
+            return "both" if user_id else "conversation"
         
         # Default: conversation-specific
         return "conversation"

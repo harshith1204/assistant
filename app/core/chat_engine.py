@@ -140,12 +140,16 @@ class ChatEngine:
         """Stream typed events over a single WebSocket loop - 5-stage FSM pipeline."""
         try:
             # ===== STAGE 1: RECEIVE & LOG =====
-            # Ensure dual context
+            # Ensure dual context - prioritize passed user_id over request
             conversation_id = request.conversation_id or str(uuid.uuid4())
-            conversation_id, user_id = self.memory_manager.ensure_dual_context(
+            # Use the user_id passed to the method (from websocket) as primary source
+            effective_user_id = user_id or request.user_id
+            conversation_id, effective_user_id = self.memory_manager.ensure_dual_context(
                 conversation_id,
-                request.user_id or user_id
+                effective_user_id
             )
+            # Use effective_user_id throughout this method
+            user_id = effective_user_id
 
             if conversation_id not in self._cancel_signals:
                 self._cancel_signals[conversation_id] = asyncio.Event()
@@ -170,10 +174,11 @@ class ChatEngine:
             await self.memory_manager.update_from_message(user_message, user_id)
 
             # Load context (profile + rolling summary + ranked memories)
+            # CRITICAL: This must load ALL user memories across conversations
             context = await self._prepare_context(
                 conversation,
                 request,
-                user_id
+                user_id  # This user_id is consistent for the user across all conversations
             )
 
             # Emit memory.used event
@@ -756,21 +761,22 @@ class ChatEngine:
             for msg in recent_messages
         ]
         
-        # Profile facts (always retrieve if user_id)
+        # Profile facts (always retrieve if user_id) - these persist across ALL conversations
         profile: List[Dict[str, Any]] = []
         if user_id:
             profile = await self.memory_manager.get_profile(user_id)
+            logger.info(f"Loaded {len(profile)} profile facts for user {user_id}")
         context["profile"] = profile
 
         # Search both user and conversation memories if enabled
-        if request.use_long_term_memory:
-            # Search both user-level and conversation-level memories
+        if request.use_long_term_memory and user_id:
+            # CRITICAL: Search ALL user memories (cross-conversation) + current conversation memories
             memories = await self.memory_manager.search_memory(
-                request.message,
-                conversation.conversation_id,
-                user_id,
-                limit=5,
-                search_scope="both"  # Search both contexts
+                query=request.message,
+                conversation_id=conversation.conversation_id,
+                user_id=user_id,  # This ensures we get ALL memories for this user
+                limit=10,  # Get more memories to ensure cross-conversation facts are included
+                search_scope="both"  # Search BOTH user (cross-conversation) and conversation-specific
             )
             context["relevant_memories"] = memories
             
