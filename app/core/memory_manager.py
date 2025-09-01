@@ -8,6 +8,7 @@ from mem0 import Memory
 import structlog
 from app.config import settings
 from app.chat_models import ConversationContext, ChatMessage, MessageRole
+import hashlib
 
 logger = structlog.get_logger()
 
@@ -66,6 +67,18 @@ class MemoryManager:
             
         self.short_term_cache: Dict[str, Dict] = {}  # In-memory cache for short-term
         self.cache_ttl = timedelta(hours=24)  # Short-term memory TTL
+        # Recent content hashes to prevent duplicate long-term writes (per user)
+        self.recent_hashes: Dict[str, Dict[str, Any]] = {}
+        self.recent_hash_ttl = timedelta(days=7)
+
+        # Memory level constants
+        self.PROFILE_LEVEL = "profile"
+        self.CONVERSATION_LEVEL = "conversation"
+        self.USER_LEVEL = "user"
+
+    def _hash_content(self, content: str) -> str:
+        """Create a stable hash for deduplication"""
+        return hashlib.sha256(content.strip().lower().encode("utf-8")).hexdigest()
     
     def _sanitize_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize metadata to ensure all values are primitive types for mem0"""
@@ -134,16 +147,32 @@ class MemoryManager:
         
         if memory_type in ["user", "both"] and user_id:
             try:
-                # Sanitize metadata for mem0
-                sanitized_meta = self._sanitize_metadata(meta)
-                
-                # Add to Mem0 with user_id for cross-conversation persistence
-                mem0_result = await asyncio.to_thread(
-                    self.memory.add,
-                    content,
-                    user_id=user_id,  # Always use user_id for long-term
-                    metadata=sanitized_meta
-                )
+                # Dedup check for long-term writes (avoid flooding)
+                content_hash = self._hash_content(content)
+                user_hashes = self.recent_hashes.get(user_id, {})
+                # Cleanup stale hashes for this user
+                now = datetime.now(timezone.utc)
+                if user_hashes:
+                    stale = [h for h, info in user_hashes.items() if now - info.get("timestamp", now) > self.recent_hash_ttl]
+                    for h in stale:
+                        user_hashes.pop(h, None)
+                # Skip if we recently stored the same fact
+                if content_hash in user_hashes:
+                    logger.info("Skipping duplicate long-term memory write", user_id=user_id)
+                else:
+                    # Sanitize metadata for mem0
+                    sanitized_meta = self._sanitize_metadata(meta)
+                    
+                    # Add to Mem0 with user_id for cross-conversation persistence
+                    mem0_result = await asyncio.to_thread(
+                        self.memory.add,
+                        content,
+                        user_id=user_id,  # Always use user_id for long-term
+                        metadata=sanitized_meta
+                    )
+                    # Track hash
+                    user_hashes[content_hash] = {"timestamp": now}
+                    self.recent_hashes[user_id] = user_hashes
             
                 logger.info(
                     "Added to long-term memory",
@@ -200,10 +229,14 @@ class MemoryManager:
                     # Fallback for older format or direct list
                     user_results = search_result if isinstance(search_result, list) else []
                 
-                # Mark these as user-level memories
+                # Mark these as user-level memories and append one by one
                 for result in user_results:
-                    result["memory_level"] = "user"
-                    results.extend(user_results)
+                    try:
+                        result["memory_level"] = "user"
+                        results.append(result)
+                    except Exception:
+                        # Be resilient to unexpected formats
+                        continue
             
             # Search conversation-level short-term cache
             if search_scope in ["conversation", "both"] and conversation_id and conversation_id in self.short_term_cache:
@@ -340,6 +373,59 @@ class MemoryManager:
                 
         except Exception as e:
             logger.error("Failed to update memory from message", error=str(e))
+
+    async def set_profile_fact(
+        self,
+        user_id: str,
+        key: str,
+        value: str,
+        priority: int = 50
+    ) -> Dict[str, Any]:
+        """Store or update a high-priority profile fact for a user"""
+        content = f"{key}: {value}"
+        metadata = {
+            "memory_level": self.PROFILE_LEVEL,
+            "pinned": True,
+            "key": key,
+            "priority": priority
+        }
+        return await self.add_to_memory(
+            conversation_id=f"profile-{user_id}",
+            content=content,
+            metadata=metadata,
+            user_id=user_id,
+            memory_type="user"
+        )
+
+    async def get_profile(self, user_id: str) -> List[Dict[str, Any]]:
+        """Fetch profile-level memories for a user"""
+        try:
+            search_result = await asyncio.to_thread(
+                self.memory.get_all,
+                user_id=user_id
+            )
+            if isinstance(search_result, dict) and "results" in search_result:
+                all_memories = search_result["results"]
+            elif isinstance(search_result, list):
+                all_memories = search_result
+            else:
+                all_memories = []
+            profile = []
+            for m in all_memories:
+                metadata = m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}
+                level = metadata.get("memory_level")
+                pinned = metadata.get("pinned")
+                if level == self.PROFILE_LEVEL or pinned is True:
+                    profile.append(m)
+            # Sort by optional priority then key
+            def _prio(x):
+                meta = x.get("metadata", {}) if isinstance(x, dict) else getattr(x, "metadata", {}) or {}
+                return (-(meta.get("priority") or 0), str(meta.get("key") or ""))
+            profile.sort(key=_prio)
+            return profile
+        except Exception as e:
+            logger.error("Failed to get profile", error=str(e))
+            return []
     
     async def _extract_and_store_entities(
         self,
