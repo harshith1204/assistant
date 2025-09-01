@@ -73,7 +73,7 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
   const [isConnected, setIsConnected] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [currentAction, setCurrentAction] = useState<string | null>(null);
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(() => localStorage.getItem('conversationId'));
   const [waitingFor, setWaitingFor] = useState<string | null>(null);
   const [actionProgress, setActionProgress] = useState<number>(0);
   
@@ -93,8 +93,16 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     // Set up message handlers
     ws.on('connected', (data) => {
       setIsConnected(true);
-      setConversationId(data.connection_id);
       addSystemMessage('Connected to assistant. How can I help you today?');
+      // Resume session mapping on server and keep our stable conversationId
+      ws.send('session.resume', { user_id: effectiveUserId });
+      // Optionally fetch history for existing conversationId
+      const existingConv = localStorage.getItem('conversationId');
+      if (existingConv) {
+        setConversationId(existingConv);
+        // If you want to restore UI messages from server-side memory, uncomment:
+        // ws.getConversationHistory(existingConv);
+      }
     });
 
     ws.on('conversational_update', handleConversationalUpdate);
@@ -114,6 +122,17 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     if (effectiveUserId) localStorage.setItem('userId', effectiveUserId);
     if (businessId !== undefined) localStorage.setItem('businessId', businessId);
   }, [effectiveUserId, businessId]);
+
+  // Ensure a stable conversationId exists
+  useEffect(() => {
+    if (!conversationId) {
+      const newConvId = `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setConversationId(newConvId);
+      localStorage.setItem('conversationId', newConvId);
+    } else {
+      localStorage.setItem('conversationId', conversationId);
+    }
+  }, [conversationId]);
 
   const handleConversationalUpdate = (update: ConversationalUpdate) => {
     console.log('Conversational update:', update);
@@ -246,6 +265,14 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
   const sendMessage = () => {
     if (!input.trim() || !wsRef.current?.isConnected()) return;
 
+    // Ensure we have a stable conversation id
+    let convId = conversationId;
+    if (!convId) {
+      convId = `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setConversationId(convId);
+      localStorage.setItem('conversationId', convId);
+    }
+
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
@@ -262,7 +289,7 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     // Send via WebSocket with conversational flag
     wsRef.current.send('chat', {
       message: input,
-      conversation_id: conversationId,
+      conversation_id: convId,
       conversational: true,
       stream: true
     });

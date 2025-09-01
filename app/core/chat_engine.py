@@ -653,6 +653,33 @@ class ChatEngine:
             routing,
             context
         )
+        # Enrich system prompt with profile and ranked long-term memories
+        try:
+            memory_context = await self._prepare_context(
+                conversation,
+                ChatRequest(message=conversation.messages[-1].content if conversation.messages else "", conversation_id=conversation.conversation_id, use_long_term_memory=True, use_web_search=False),
+                user_id
+            )
+            system_injection_lines: List[str] = []
+            def _extract_line(m: Dict[str, Any]) -> str:
+                if isinstance(m, dict):
+                    return (m.get("memory") or m.get("content") or str(m)).strip()
+                return str(m).strip()
+            profile = memory_context.get("profile", [])
+            ranked = memory_context.get("ranked_memories", [])
+            if profile:
+                system_injection_lines.append("\nPROFILE:")
+                for m in profile[:8]:
+                    system_injection_lines.append(f"- {_extract_line(m)[:200]}")
+            if ranked:
+                system_injection_lines.append("\nLONG-TERM FACTS:")
+                for m in ranked[:5]:
+                    system_injection_lines.append(f"- {_extract_line(m)[:200]}")
+            if system_injection_lines and messages and messages[0].get("role") == "system":
+                messages[0]["content"] = messages[0]["content"] + "\n" + "\n".join(system_injection_lines)
+        except Exception:
+            # Non-fatal enrichment failure
+            pass
         stream = await self.groq_client.chat.completions.create(
             model=settings.groq_model,
             messages=messages,
