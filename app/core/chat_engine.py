@@ -4,7 +4,7 @@ import json
 import asyncio
 import uuid
 from typing import Dict, Any, List, Optional, AsyncGenerator
-from datetime import datetime
+from datetime import datetime, timezone
 import math
 from groq import AsyncGroq
 import structlog
@@ -785,7 +785,7 @@ class ChatEngine:
             context["conversation_memories"] = [m for m in memories if m.get("memory_level") == "conversation"]
 
             # Composite ranking of memories
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             def _score(m: Dict[str, Any]) -> float:
                 meta = m.get("metadata", {}) if isinstance(m, dict) else {}
                 semantic = float(m.get("score", 0.0))
@@ -1199,7 +1199,7 @@ Provide 3 short, specific questions that would naturally continue the conversati
         return {
             "summary": response.choices[0].message.content,
             "message_count": conversation.get_message_count(),
-            "duration": (datetime.utcnow() - conversation.created_at).total_seconds(),
+            "duration": (datetime.now(timezone.utc) - conversation.created_at).total_seconds(),
             "topics": conversation.context.topics
         }
     

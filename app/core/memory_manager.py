@@ -625,7 +625,7 @@ class MemoryManager:
         from datetime import datetime
         import math
         
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         
         for result in results:
             # Start with semantic score
