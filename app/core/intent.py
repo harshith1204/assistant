@@ -182,9 +182,34 @@ Return ONLY valid JSON:
                 max_tokens=1000
             )
             
-            result = json.loads(response.choices[0].message.content)
+            # Check if response has content
+            if not response.choices or not response.choices[0].message.content:
+                logger.warning("Empty response from LLM for intent analysis")
+                return {
+                    "intent": "general_chat",
+                    "confidence": 0.5,
+                    "needs_clarification": True
+                }
+            
+            # Parse JSON response
+            content = response.choices[0].message.content.strip()
+            
+            # Try to extract JSON if there's extra text
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                content = json_match.group()
+            
+            result = json.loads(content)
             return result
             
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse intent JSON", error=str(e), response_content=content if 'content' in locals() else None)
+            return {
+                "intent": "general_chat",
+                "confidence": 0.5,
+                "needs_clarification": True
+            }
         except Exception as e:
             logger.error("Failed to analyze intent", error=str(e))
             return {
