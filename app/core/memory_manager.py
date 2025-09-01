@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
 import asyncio
 from mem0 import Memory
+from pathlib import Path
 import structlog
 from app.config import settings
 from app.chat_models import ConversationContext, ChatMessage, MessageRole
@@ -20,6 +21,14 @@ class MemoryManager:
         """Initialize memory manager with Mem0"""
         # Configure Mem0 - using a simpler configuration without explicit embedder
         # Mem0 will use its default embedding configuration
+        # Resolve a stable absolute path for the vector store to persist across restarts
+        resolved_db_path = str(Path(settings.memory_db_path).resolve())
+        try:
+            Path(resolved_db_path).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Directory may already exist or path may be a file; ignore errors here
+            pass
+
         config = {
             "llm": {
                 "provider": "groq",
@@ -34,7 +43,8 @@ class MemoryManager:
                 "provider": "chroma",
                 "config": {
                     "collection_name": settings.memory_collection_name,
-                    "path": settings.memory_db_path,
+                    # Use absolute path to ensure persistence is stable across working directories
+                    "path": resolved_db_path,
                 }
             },
             "version": "v1.1"
