@@ -115,6 +115,34 @@ class ConnectionManager:
                     error=str(e)
                 )
                 self.disconnect(connection_id)
+
+    async def send_context_snapshot(
+        self,
+        connection_id: str,
+        conversation_id: Optional[str],
+        user_id: Optional[str]
+    ):
+        """Send current dual-context snapshot to client"""
+        try:
+            context = None
+            if conversation_id:
+                conversation = await self.chat_engine.get_conversation(conversation_id)
+                if conversation:
+                    context = await self.chat_engine._prepare_dual_context(conversation, user_id)
+            if context is None:
+                context = {
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                }
+            await self.send_message(
+                connection_id,
+                WebSocketMessage(
+                    type="context_snapshot",
+                    data=context
+                )
+            )
+        except Exception as e:
+            logger.error("Failed to send context snapshot", connection_id=connection_id, error=str(e))
     
     async def broadcast_to_user(
         self,
@@ -180,6 +208,13 @@ class ConnectionManager:
                         data=response.model_dump()
                     )
                 )
+
+                # Push updated context snapshot
+                await self.send_context_snapshot(
+                    connection_id,
+                    response.conversation_id,
+                    user_id
+                )
                 
         except Exception as e:
             logger.error(
@@ -244,6 +279,13 @@ class ConnectionManager:
                     }
                 )
             )
+
+            # Push updated context snapshot
+            await self.send_context_snapshot(
+                connection_id,
+                conversation_id,
+                user_id
+            )
             
         except Exception as e:
             logger.error(
@@ -280,6 +322,14 @@ class ConnectionManager:
                         data=update
                     )
                 )
+
+                # Opportunistically push context snapshots on key updates
+                if update.get("type") in {"acknowledgment", "research_complete", "chat_complete", "crm_action_complete", "pms_action_complete"}:
+                    await self.send_context_snapshot(
+                        connection_id,
+                        request.conversation_id,
+                        user_id
+                    )
                 
                 # Handle special update types
                 if update.get("type") == "clarification_needed":
@@ -302,6 +352,75 @@ class ConnectionManager:
                     type="conversational_error",
                     data={"error": str(e)}
                 )
+            )
+
+    async def handle_memory_operation(
+        self,
+        connection_id: str,
+        data: Dict,
+        user_id: Optional[str] = None
+    ):
+        """Handle memory operations: add, clear_short_term, search"""
+        try:
+            operation = data.get("operation")
+            conversation_id = data.get("conversation_id")
+            if not conversation_id:
+                raise ValueError("conversation_id is required")
+
+            if operation == "add":
+                content = data.get("content", "")
+                metadata = data.get("metadata", {})
+                memory_type = data.get("memory_type", "both")
+                result = await self.chat_engine.memory_manager.add_to_memory(
+                    conversation_id=conversation_id,
+                    content=content,
+                    metadata=metadata,
+                    user_id=user_id,
+                    memory_type=memory_type
+                )
+                await self.send_message(
+                    connection_id,
+                    WebSocketMessage(
+                        type="memory_ack",
+                        data={"result": result}
+                    )
+                )
+            elif operation == "clear_short_term":
+                await self.chat_engine.memory_manager.clear_short_term_memory(conversation_id)
+                await self.send_message(
+                    connection_id,
+                    WebSocketMessage(
+                        type="memory_ack",
+                        data={"result": {"success": True}}
+                    )
+                )
+            elif operation == "search":
+                query = data.get("query", "")
+                results = await self.chat_engine.memory_manager.search_memory(
+                    query=query,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    limit=5,
+                    search_scope=data.get("search_scope", "both")
+                )
+                await self.send_message(
+                    connection_id,
+                    WebSocketMessage(
+                        type="memory_results",
+                        data={"results": results}
+                    )
+                )
+            else:
+                raise ValueError(f"Unsupported memory operation: {operation}")
+
+            # Push updated context after memory change
+            await self.send_context_snapshot(connection_id, conversation_id, user_id)
+
+        except Exception as e:
+            logger.error("Failed memory operation", connection_id=connection_id, error=str(e))
+            await self.send_message(
+                connection_id,
+                WebSocketMessage(type="memory_error", data={"error": str(e)})
             )
     
     async def handle_research_request(
@@ -494,6 +613,12 @@ async def websocket_endpoint(
                 await manager.send_message(
                     connection_id,
                     WebSocketMessage(type="pong", data={})
+                )
+            elif message_type == "memory":
+                await manager.handle_memory_operation(
+                    connection_id,
+                    data.get("data", {}),
+                    user_id
                 )
             else:
                 await manager.send_message(

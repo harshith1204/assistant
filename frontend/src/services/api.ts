@@ -364,6 +364,35 @@ export class WebSocketService {
   }
 
   /**
+   * Memory operations over WebSocket
+   */
+  addMemory(conversationId: string, content: string, metadata: Record<string, any> = {}, memoryType: 'user' | 'conversation' | 'both' = 'both') {
+    this.send('memory', {
+      operation: 'add',
+      conversation_id: conversationId,
+      content,
+      metadata,
+      memory_type: memoryType,
+    });
+  }
+
+  clearShortTerm(conversationId: string) {
+    this.send('memory', {
+      operation: 'clear_short_term',
+      conversation_id: conversationId,
+    });
+  }
+
+  searchMemory(conversationId: string, query: string, scope: 'user' | 'conversation' | 'both' = 'both') {
+    this.send('memory', {
+      operation: 'search',
+      conversation_id: conversationId,
+      query,
+      search_scope: scope,
+    });
+  }
+
+  /**
    * Send chat message with dual context
    */
   sendChatMessage(message: string, conversationId?: string, stream = true) {

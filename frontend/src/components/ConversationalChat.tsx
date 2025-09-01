@@ -76,6 +76,8 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [waitingFor, setWaitingFor] = useState<string | null>(null);
   const [actionProgress, setActionProgress] = useState<number>(0);
+  const [useLongTerm, setUseLongTerm] = useState<boolean>(true);
+  const [contextSnapshot, setContextSnapshot] = useState<any | null>(null);
   
   const wsRef = useRef<WebSocketService | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -96,6 +98,13 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     ws.on('conversational_update', handleConversationalUpdate);
     ws.on('typing', () => setIsTyping(true));
     ws.on('error', handleError);
+    ws.on('context_snapshot', (data) => setContextSnapshot(data));
+    ws.on('memory_ack', () => {
+      addSystemMessage('Memory updated');
+    });
+    ws.on('memory_results', (data) => {
+      addAssistantMessage(`Relevant memories:\n${(data.results || []).map((r: any) => `- ${r.memory || r.text || ''}`).join('\n')}`);
+    });
 
     // Connect
     ws.connect().catch(console.error);
@@ -254,7 +263,8 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
       message: input,
       conversation_id: conversationId,
       conversational: true,
-      stream: true
+      stream: true,
+      use_long_term_memory: useLongTerm
     });
 
     // Mark as sent
@@ -318,7 +328,7 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
             <Bot className="w-5 h-5" />
             AI Assistant
           </CardTitle>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             {isConnected ? (
               <Badge variant="default" className="bg-green-500">
                 <CheckCircle className="w-3 h-3 mr-1" />
@@ -330,6 +340,22 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
                 Connecting...
               </Badge>
             )}
+            <div className="flex items-center gap-2 text-sm">
+              <span>Long-term</span>
+              <input
+                type="checkbox"
+                checked={useLongTerm}
+                onChange={(e) => setUseLongTerm(e.target.checked)}
+              />
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => conversationId && wsRef.current?.clearShortTerm(conversationId)}
+              disabled={!conversationId}
+            >
+              Clear short-term
+            </Button>
           </div>
         </div>
       </CardHeader>
@@ -421,6 +447,21 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
             <div ref={messagesEndRef} />
           </div>
         </ScrollArea>
+
+        {contextSnapshot && (
+          <div className="px-4 pb-2 text-xs text-muted-foreground">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <div className="font-medium">Conversation context</div>
+                <pre className="whitespace-pre-wrap break-words">{JSON.stringify((contextSnapshot as any).conversation_context || (contextSnapshot as any).conversationContext || {}, null, 2)}</pre>
+              </div>
+              <div>
+                <div className="font-medium">User context</div>
+                <pre className="whitespace-pre-wrap break-words">{JSON.stringify((contextSnapshot as any).user_context || (contextSnapshot as any).userContext || {}, null, 2)}</pre>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="p-4 border-t">
           <div className="flex gap-2 items-center">
