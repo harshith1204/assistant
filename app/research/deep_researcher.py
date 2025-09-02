@@ -16,11 +16,8 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
-from .configuration import (
-    Configuration,
-)
+from .configuration import Configuration
 from .prompts import (
-    clarify_with_user_instructions,
     compress_research_simple_human_message,
     compress_research_system_prompt,
     final_report_generation_prompt,
@@ -31,7 +28,6 @@ from .prompts import (
 from .state import (
     AgentInputState,
     AgentState,
-    ClarifyWithUser,
     ConductResearch,
     ResearchComplete,
     ResearcherOutputState,
@@ -56,62 +52,7 @@ configurable_model = init_chat_model(
     configurable_fields=("model", "max_tokens", "api_key"),
 )
 
-async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
-    """Analyze user messages and ask clarifying questions if the research scope is unclear.
-    
-    This function determines whether the user's request needs clarification before proceeding
-    with research. If clarification is disabled or not needed, it proceeds directly to research.
-    
-    Args:
-        state: Current agent state containing user messages
-        config: Runtime configuration with model settings and preferences
-        
-    Returns:
-        Command to either end with a clarifying question or proceed to research brief
-    """
-    # Step 1: Check if clarification is enabled in configuration
-    configurable = Configuration.from_runnable_config(config)
-    if not configurable.allow_clarification:
-        # Skip clarification step and proceed directly to research
-        return Command(goto="write_research_brief")
-    
-    # Step 2: Prepare the model for structured clarification analysis
-    messages = state["messages"]
-    model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
-    
-    # Configure model with structured output and retry logic
-    clarification_model = (
-        configurable_model
-        .with_structured_output(ClarifyWithUser)
-        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-        .with_config(model_config)
-    )
-    
-    # Step 3: Analyze whether clarification is needed
-    prompt_content = clarify_with_user_instructions.format(
-        messages=get_buffer_string(messages), 
-        date=get_today_str()
-    )
-    response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
-    
-    # Step 4: Route based on clarification analysis
-    if response.need_clarification:
-        # End with clarifying question for user
-        return Command(
-            goto=END, 
-            update={"messages": [AIMessage(content=response.question)]}
-        )
-    else:
-        # Proceed to research with verification message
-        return Command(
-            goto="write_research_brief", 
-            update={"messages": [AIMessage(content=response.verification)]}
-        )
+
 
 
 async def write_research_brief(state: AgentState, config: RunnableConfig) -> Command[Literal["research_supervisor"]]:
@@ -362,29 +303,30 @@ supervisor_builder.add_edge(START, "supervisor")  # Entry point to supervisor
 supervisor_subgraph = supervisor_builder.compile()
 
 async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[Literal["researcher_tools"]]:
-    """Individual researcher that conducts focused research on specific topics.
-    
-    This researcher is given a specific research topic by the supervisor and uses
-    available tools (search, think_tool, MCP tools) to gather comprehensive information.
-    It can use think_tool for strategic planning between searches.
-    
+    """Individual researcher that conducts focused, systematic research on assigned topics.
+
+    This function manages an individual research agent that is assigned a specific research
+    topic by the supervisor. The researcher uses available tools including web search,
+    strategic thinking (think_tool), and analysis tools to gather comprehensive information
+    on the assigned topic. It can also use think_tool for strategic planning between searches
+    and research iterations.
+
     Args:
-        state: Current researcher state with messages and topic context
-        config: Runtime configuration with model settings and tool availability
-        
+        state: Current researcher state containing messages, topic assignment, and iteration count
+        config: Runtime configuration with model settings, tool availability, and research limits
+
     Returns:
-        Command to proceed to researcher_tools for tool execution
+        Command to proceed to researcher_tools for tool execution and analysis
     """
     # Step 1: Load configuration and validate tool availability
     configurable = Configuration.from_runnable_config(config)
     researcher_messages = state.get("researcher_messages", [])
     
-    # Get all available research tools (search, MCP, think_tool)
+    # Get all available research tools (search, think_tool)
     tools = await get_all_tools(config)
     if len(tools) == 0:
         raise ValueError(
-            "No tools found to conduct research: Please configure either your "
-            "search API or add MCP tools to your configuration."
+            "No tools found to conduct research: Please configure your search API."
         )
     
     # Step 2: Configure the researcher model with tools
@@ -395,9 +337,8 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         "tags": ["langsmith:nostream"]
     }
     
-    # Prepare system prompt with MCP context if available
+    # Prepare system prompt
     researcher_prompt = research_system_prompt.format(
-        mcp_prompt=configurable.mcp_prompt or "", 
         date=get_today_str()
     )
     
@@ -424,7 +365,20 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
 
 # Tool Execution Helper Function
 async def execute_tool_safely(tool, args, config):
-    """Safely execute a tool with error handling."""
+    """Safely execute a tool with comprehensive error handling and recovery.
+
+    This function wraps tool execution with proper error handling to prevent
+    research workflow interruption. It catches exceptions and provides informative
+    error messages while allowing the research process to continue.
+
+    Args:
+        tool: The tool object to execute (must have an ainoke method)
+        args: Arguments to pass to the tool
+        config: Runtime configuration for tool execution
+
+    Returns:
+        Tool execution result or error message string if execution fails
+    """
     try:
         return await tool.ainvoke(args, config)
     except Exception as e:
@@ -433,12 +387,11 @@ async def execute_tool_safely(tool, args, config):
 
 async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Command[Literal["researcher", "compress_research"]]:
     """Execute tools called by the researcher, including search tools and strategic thinking.
-    
+
     This function handles various types of researcher tool calls:
     1. think_tool - Strategic reflection that continues the research conversation
-    2. Search tools (tavily_search, web_search) - Information gathering
-    3. MCP tools - External tool integrations
-    4. ResearchComplete - Signals completion of individual research task
+    2. Search tools - Information gathering
+    3. ResearchComplete - Signals completion of individual research task
     
     Args:
         state: Current researcher state with messages and iteration count
@@ -459,7 +412,7 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     if not has_tool_calls and not has_native_search:
         return Command(goto="compress_research")
     
-    # Step 2: Handle other tool calls (search, MCP tools, etc.)
+    # Step 2: Handle other tool calls (search tools, etc.)
     tools = await get_all_tools(config)
     tools_by_name = {
         tool.name if hasattr(tool, "name") else tool.get("name", "web_search"): tool 
@@ -701,13 +654,13 @@ deep_researcher_builder = StateGraph(
 )
 
 # Add main workflow nodes for the complete research process
-deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)           # User clarification phase
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
 deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
 
 # Define main workflow edges for sequential execution
-deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
+deep_researcher_builder.add_edge(START, "write_research_brief")                    # Entry point
+deep_researcher_builder.add_edge("write_research_brief", "research_supervisor")    # Planning to research
 deep_researcher_builder.add_edge("research_supervisor", "final_report_generation") # Research to report
 deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
 

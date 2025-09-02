@@ -17,6 +17,7 @@ from app.chat_models import (
 from app.models import ResearchRequest, ResearchBrief
 from app.core.memory_manager import MemoryManager
 from app.research.service import ResearchService
+from app.core.research_engine import ResearchEngine
 from app.core.intent import (
     IntentDetector
 )
@@ -35,6 +36,7 @@ class ChatEngine:
         self.groq_client = AsyncGroq(api_key=settings.groq_api_key)
         self.memory_manager = MemoryManager()
         self.research_service = ResearchService()
+        self.research_engine = ResearchEngine()
         # Simple intent detection
         self.intent_detector = IntentDetector()
         self.crm_client = CRMClient()
@@ -568,24 +570,49 @@ class ChatEngine:
             entities = routing.get("entities", {})
             topics = entities.get("topics", [])
             original_message = conversation.messages[-1].content
-            research_request = ResearchRequest(
-                query=original_message,
-                max_sources=params.get("max_sources", 15),
-                deep_dive=True
+
+            # Prepare base context for research
+            base_context = await self._prepare_context(
+                conversation,
+                ChatRequest(message=original_message),  # Create a minimal request for context
+                user_id
             )
+
+            # Prepare specialized research context
+            research_context = await self._prepare_research_context(
+                conversation, original_message, user_id, base_context
+            )
+
+            # Extract inferred parameters and merge with routing parameters
+            inferred_params = research_context.get("inferred_parameters", {})
+            merged_params = {**inferred_params, **params}  # routing params override inferred
+
             yield {
                 "type": "research_started",
-                "content": "🔍 Starting research...",
-                "topics": topics
+                "content": "🔍 Starting comprehensive research...",
+                "topics": topics,
+                "inferred_params": inferred_params
             }
+
+            # Prepare conversation context for research service
+            conversation_context = {
+                "entities": research_context.get("research_entities", {}),
+                "topics": research_context.get("conversation_metadata", {}).get("topics", []),
+                "preferences": {
+                    "industry": merged_params.get("industry"),
+                    "geography": merged_params.get("geography")
+                },
+                "research_history": research_context.get("research_history", [])
+            }
+
             research_brief = await self.research_service.research(
                 query=original_message,
-                scope=params.get("scope", []),
-                industry=params.get("industry"),
-                geography=params.get("geography"),
-                max_sources=params.get("max_sources", 15),
-                mode="standard",
-                user_id=user_id
+                scope=merged_params.get("scope", []),
+                industry=merged_params.get("industry"),
+                geography=merged_params.get("geography"),
+                max_sources=merged_params.get("max_sources", 15),
+                user_id=user_id,
+                conversation_context=conversation_context
             )
             yield {
                 "type": "research_progress",
@@ -617,7 +644,10 @@ class ChatEngine:
             await self.memory_manager.update_from_message(research_message, user_id)
         except Exception as e:
             logger.error("Research action failed", error=str(e))
-            yield {"type": "error", "content": f"I encountered an issue with the research: {str(e)}"}
+            # Create intelligent error response
+            error_type = self._categorize_research_error(e)
+            error_message = await self._create_generic_error_response(original_message, e)
+            yield {"type": "error", "content": error_message, "error_type": error_type}
     
     async def _handle_crm_action(
         self,
@@ -834,6 +864,156 @@ class ChatEngine:
 
         return context
 
+    async def _prepare_research_context(
+        self,
+        conversation: Conversation,
+        message: str,
+        user_id: Optional[str],
+        base_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Prepare specialized context for research operations"""
+        research_context = base_context.copy()
+
+        # Extract research-relevant information from user profile
+        if base_context.get("profile"):
+            profile_facts = base_context["profile"]
+
+            # Look for business/research preferences
+            research_preferences = {
+                "industries": [],
+                "geographies": [],
+                "research_topics": [],
+                "business_focus": []
+            }
+
+            for fact in profile_facts:
+                fact_text = str(fact).lower()
+
+                # Extract industry preferences
+                if any(word in fact_text for word in ["industry", "sector", "business"]):
+                    research_preferences["industries"].append(str(fact))
+
+                # Extract geography preferences
+                if any(word in fact_text for word in ["location", "country", "region", "market"]):
+                    research_preferences["geographies"].append(str(fact))
+
+                # Extract research topics
+                if any(word in fact_text for word in ["research", "study", "analysis", "investigation"]):
+                    research_preferences["research_topics"].append(str(fact))
+
+                # Extract business focus
+                if any(word in fact_text for word in ["startup", "enterprise", "consulting", "strategy"]):
+                    research_preferences["business_focus"].append(str(fact))
+
+            research_context["research_preferences"] = research_preferences
+
+        # Extract conversation topics and entities relevant to research
+        conversation_metadata = base_context.get("conversation_metadata", {})
+        research_context["research_entities"] = {
+            "mentioned_companies": [],
+            "mentioned_industries": [],
+            "research_queries": [],
+            "key_topics": conversation_metadata.get("topics", [])
+        }
+
+        # Analyze recent messages for research patterns
+        recent_messages = base_context.get("recent_messages", [])
+        for msg in recent_messages[-10:]:  # Last 10 messages
+            content = msg.get("content", "").lower()
+
+            # Look for company mentions
+            company_indicators = ["company", "corporation", "startup", "business", "organization"]
+            if any(indicator in content for indicator in company_indicators):
+                research_context["research_entities"]["mentioned_companies"].append(msg["content"])
+
+            # Look for industry mentions
+            industry_keywords = ["industry", "sector", "market", "technology", "finance", "healthcare"]
+            if any(keyword in content for keyword in industry_keywords):
+                research_context["research_entities"]["mentioned_industries"].append(msg["content"])
+
+            # Look for previous research queries
+            research_keywords = ["research", "find", "analyze", "investigate", "study"]
+            if any(keyword in content for keyword in research_keywords):
+                research_context["research_entities"]["research_queries"].append(msg["content"])
+
+        # Add research history from memory
+        if user_id:
+            research_history = await self.memory_manager.search_memory(
+                query="research OR analysis OR investigation OR study",
+                user_id=user_id,
+                limit=10,
+                search_scope="user"
+            )
+            research_context["research_history"] = research_history
+
+        # Determine research scope and parameters based on message analysis
+        research_context["inferred_parameters"] = self._infer_research_parameters(message, research_context)
+
+        return research_context
+
+    def _infer_research_parameters(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Infer research parameters from message and context"""
+        message_lower = message.lower()
+        params = {
+            "max_sources": 15,
+            "scope": [],
+            "industry": None,
+            "geography": None
+        }
+
+        # Determine research depth based on source count
+        if any(word in message_lower for word in ["comprehensive", "detailed", "thorough", "extensive", "in-depth"]):
+            params["max_sources"] = 25
+        elif any(word in message_lower for word in ["quick", "brief", "overview", "summary"]):
+            params["max_sources"] = 8
+
+        # Infer industry from message or context
+        industries = ["technology", "finance", "healthcare", "retail", "manufacturing",
+                     "energy", "education", "real estate", "automotive", "food"]
+
+        for industry in industries:
+            if industry in message_lower:
+                params["industry"] = industry
+                break
+
+        # Use industry from research preferences if not found in message
+        if not params["industry"] and context.get("research_preferences", {}).get("industries"):
+            # Extract industry from preferences (simplified)
+            pref_text = " ".join(context["research_preferences"]["industries"]).lower()
+            for industry in industries:
+                if industry in pref_text:
+                    params["industry"] = industry
+                    break
+
+        # Infer geography
+        geographies = ["united states", "europe", "asia", "china", "india", "germany",
+                      "japan", "uk", "canada", "australia"]
+
+        for geo in geographies:
+            if geo in message_lower:
+                params["geography"] = geo
+                break
+
+        # Determine research scope
+        scope_keywords = {
+            "market": ["market", "demand", "competition", "pricing"],
+            "competitors": ["competitor", "competition", "rival", "versus"],
+            "technology": ["technology", "tech", "innovation", "software"],
+            "customer": ["customer", "user", "consumer", "audience"],
+            "pricing": ["pricing", "cost", "revenue", "profit"],
+            "regulatory": ["regulation", "legal", "compliance", "policy"]
+        }
+
+        for scope_name, keywords in scope_keywords.items():
+            if any(keyword in message_lower for keyword in keywords):
+                params["scope"].append(scope_name)
+
+        # Default scope if none detected
+        if not params["scope"]:
+            params["scope"] = ["market"]
+
+        return params
+
     async def _maybe_create_rolling_summary(self, conversation: Conversation) -> bool:
         """Create a rolling summary after every ~10 turns and store it as conversation-level memory.
         Returns True if a summary was created this turn.
@@ -876,27 +1056,73 @@ class ChatEngine:
         message: str,
         context: Dict[str, Any]
     ) -> bool:
-        """Determine if the message needs research"""
-        research_indicators = [
-            "research", "find out", "look up", "search for",
-            "what is", "how does", "analyze", "investigate",
-            "tell me about", "explain", "market analysis",
-            "competitor", "pricing", "trends", "statistics"
-        ]
-        
+        """Determine if the message needs research with enhanced detection"""
         message_lower = message.lower()
-        
-        # Check for research indicators
-        if any(indicator in message_lower for indicator in research_indicators):
+
+        # High-confidence research indicators
+        high_confidence_indicators = [
+            "research", "investigate", "analyze", "market analysis",
+            "competitor analysis", "industry report", "trends",
+            "statistics", "data on", "find information about",
+            "what's the latest on", "current status of"
+        ]
+
+        # Medium-confidence research indicators
+        medium_confidence_indicators = [
+            "find out", "look up", "search for", "tell me about",
+            "explain how", "how does", "what are the",
+            "who are the", "where can I find"
+        ]
+
+        # Check for high-confidence indicators
+        if any(indicator in message_lower for indicator in high_confidence_indicators):
             return True
-        
-        # Check if it's a question that might need current information
-        if "?" in message and any(
-            word in message_lower 
-            for word in ["latest", "current", "recent", "today", "now"]
-        ):
+
+        # Check for medium-confidence indicators
+        if any(indicator in message_lower for indicator in medium_confidence_indicators):
             return True
-        
+
+        # Check for questions that need current/fresh information
+        if "?" in message:
+            temporal_indicators = [
+                "latest", "current", "recent", "today", "now",
+                "this year", "this month", "recently", "new",
+                "updated", "fresh", "breaking"
+            ]
+
+            if any(word in message_lower for word in temporal_indicators):
+                return True
+
+            # Check for specific business/research questions
+            business_questions = [
+                "what is", "how much", "how many", "where is",
+                "who is", "when was", "why is", "which is"
+            ]
+
+            question_words = message_lower.split()
+            if any(q in " ".join(question_words[:3]) for q in business_questions):
+                return True
+
+        # Check for specific research domains
+        research_domains = [
+            "market", "industry", "competition", "pricing",
+            "strategy", "business", "company", "product",
+            "technology", "innovation", "growth", "revenue"
+        ]
+
+        domain_count = sum(1 for domain in research_domains if domain in message_lower)
+        if domain_count >= 2:  # Multiple research domains suggest research needed
+            return True
+
+        # Check conversation context for research patterns
+        if context.get("profile"):
+            # If user has previously asked research questions, be more likely to research
+            profile_text = " ".join([str(fact) for fact in context["profile"]])
+            if any(indicator in profile_text.lower() for indicator in high_confidence_indicators):
+                # Lower threshold for research if user has research history
+                if len(message.split()) > 6:  # Longer messages more likely to need research
+                    return True
+
         return False
     
     async def _handle_research_request(
@@ -906,8 +1132,13 @@ class ChatEngine:
         context: Dict[str, Any],
         user_id: Optional[str]
     ) -> ChatResponse:
-        """Handle a research request"""
+        """Handle a research request with enhanced context"""
         try:
+            # Prepare specialized research context
+            research_context = await self._prepare_research_context(
+                conversation, message, user_id, context
+            )
+
             # Create status message
             status_message = ChatMessage(
                 conversation_id=conversation.conversation_id,
@@ -916,17 +1147,32 @@ class ChatEngine:
                 message_type=MessageType.STATUS
             )
             conversation.add_message(status_message)
-            
-            # Create research request
-            research_request = ResearchRequest(
+
+            # Extract inferred parameters
+            inferred_params = research_context.get("inferred_parameters", {})
+
+            # Prepare conversation context for research service
+            conversation_context = {
+                "entities": research_context.get("research_entities", {}),
+                "topics": research_context.get("conversation_metadata", {}).get("topics", []),
+                "preferences": {
+                    "industry": inferred_params.get("industry"),
+                    "geography": inferred_params.get("geography")
+                },
+                "research_history": research_context.get("research_history", [])
+            }
+
+            # Execute research using the unified research service
+            logger.info("Starting research via unified service", query=message)
+            research_brief = await self.research_service.research(
                 query=message,
-                max_sources=15,
-                deep_dive=True
+                scope=inferred_params.get("scope", []),
+                industry=inferred_params.get("industry"),
+                geography=inferred_params.get("geography"),
+                max_sources=inferred_params.get("max_sources", 15),
+                user_id=user_id,
+                conversation_context=conversation_context
             )
-            
-            # Run research
-            logger.info("Running research from chat", query=message)
-            research_brief = await self.research_engine.run_research(research_request)
             
             # Format research results
             formatted_response = await self._format_research_results(research_brief)
@@ -961,21 +1207,13 @@ class ChatEngine:
             )
             
         except Exception as e:
-            logger.error("Research request failed", error=str(e))
-            error_message = ChatMessage(
-                conversation_id=conversation.conversation_id,
-                role=MessageRole.ASSISTANT,
-                content=f"I encountered an error while researching: {str(e)}. Let me try to help you with the information I have.",
-                message_type=MessageType.ERROR
-            )
-            conversation.add_message(error_message)
-            
-            # Fall back to regular response
-            return await self._generate_chat_response(
-                conversation,
-                message,
-                context,
-                user_id
+            # Use enhanced error handling with intelligent fallback
+            return await self._handle_research_error(
+                error=e,
+                query=message,
+                conversation=conversation,
+                user_id=user_id,
+                research_context=research_context
             )
     
     async def _generate_chat_response(
@@ -1134,20 +1372,196 @@ Respond naturally and conversationally.""".format(
         return formatted
     
     async def _format_research_conversationally(self, brief: ResearchBrief) -> str:
-        """Format research results conversationally"""
-        response = f"I've completed the research on **{brief.query}**. Here's what I found:\n\n"
+        """Format research results in a conversational, engaging way"""
+        # Start with an engaging introduction
+        query_keywords = brief.query.lower().split()[:3]
+        response = f"I've completed comprehensive research on **{brief.query}**. Here's what I discovered:\n\n"
+
+        # Executive summary with personality
         if brief.executive_summary:
-            response += f"**Summary:** {brief.executive_summary}\n\n"
-        response += f"**Key Findings:**\n"
-        for i, finding in enumerate(brief.findings[:3], 1):
-            response += f"{i}. **{finding.title}** - {finding.summary}\n"
+            response += f"**In summary:** {brief.executive_summary}\n\n"
+        else:
+            response += f"**Here's what stands out:**\n\n"
+
+        # Key findings with better formatting
+        if brief.findings:
+            response += "**Key Findings:**\n"
+            for i, finding in enumerate(brief.findings[:4], 1):
+                # Make titles more conversational
+                title = finding.title
+                if not title.endswith('?') and not title.endswith('.'):
+                    title = title.rstrip() + '.'
+
+                response += f"• **{title}** {finding.summary}"
+
+                # Add key insights if available
+                if finding.key_insights:
+                    insights = finding.key_insights[:2]  # Limit to 2 most important
+                    response += f"\n  Key points: {' • '.join(insights)}"
+
+                response += "\n\n"
+
+        # Actionable ideas with RICE scoring
         if brief.ideas:
-            response += f"\n**Recommendations:**\n"
-            for i, idea in enumerate(brief.ideas[:3], 1):
-                response += f"{i}. {idea.idea}\n"
-        response += f"\n*Based on {brief.total_sources} sources with {brief.average_confidence:.0%} confidence*"
+            response += "**Actionable Recommendations:**\n"
+            # Sort by RICE score if available
+            sorted_ideas = sorted(
+                brief.ideas,
+                key=lambda x: x.rice.score if x.rice.score else 0,
+                reverse=True
+            )
+
+            for i, idea in enumerate(sorted_ideas[:3], 1):
+                response += f"• **{idea.idea}**\n"
+                response += f"  _{idea.rationale}_\n"
+
+                # Add RICE score if meaningful
+                if idea.rice.score and idea.rice.score > 0:
+                    response += f"  *Priority score: {idea.rice.score:.1f}*\n"
+
+                response += "\n"
+
+        # Strategic priorities (if available from business research)
+        if hasattr(brief, 'strategic_priorities') and brief.strategic_priorities:
+            response += "**Strategic Focus Areas:**\n"
+            for priority in brief.strategic_priorities[:3]:
+                response += f"• {priority}\n"
+            response += "\n"
+
+        # Risk assessment (if available)
+        if hasattr(brief, 'risk_assessment') and brief.risk_assessment:
+            risk_level = brief.risk_assessment.get('overall_risk_level', 'unknown')
+            if risk_level != 'unknown':
+                risk_emoji = {'low': '🟢', 'medium': '🟡', 'high': '🔴'}.get(risk_level, '⚪')
+                response += f"**Risk Assessment:** {risk_emoji} {risk_level.title()} overall risk level\n\n"
+
+        # Sources and confidence with context
+        confidence_desc = {
+            0.8: "highly confident",
+            0.6: "moderately confident",
+            0.4: "somewhat confident"
+        }.get(round(brief.average_confidence, 1), "preliminary")
+
+        response += f"---\n*This analysis is based on {brief.total_sources} diverse sources. "
+        response += f"I'm {confidence_desc} in these findings "
+        response += f"(average confidence: {brief.average_confidence:.0%}).*\n\n"
+
+        # Add research brief ID for tracking
+        response += f"*Research Brief ID: {brief.brief_id[:8]}...*"
+
         return response
-    
+
+    async def _handle_research_error(
+        self,
+        error: Exception,
+        query: str,
+        conversation: Conversation,
+        user_id: Optional[str],
+        research_context: Optional[Dict[str, Any]] = None
+    ) -> ChatResponse:
+        """Handle research errors with intelligent fallback and recovery"""
+        logger.error("Research failed", error=str(error), query=query)
+
+        # Categorize the error type
+        error_type = self._categorize_research_error(error)
+
+        # Create appropriate fallback response based on error type
+        if error_type == "network":
+            fallback_response = await self._create_network_error_response(query, research_context)
+        elif error_type == "parsing":
+            fallback_response = await self._create_parsing_error_response(query)
+        elif error_type == "rate_limit":
+            fallback_response = await self._create_rate_limit_response(query)
+        elif error_type == "service_unavailable":
+            fallback_response = await self._create_service_unavailable_response(query)
+        else:
+            fallback_response = await self._create_generic_error_response(query, error)
+
+        # Create error message
+        error_message = ChatMessage(
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.ASSISTANT,
+            content=fallback_response,
+            message_type=MessageType.ERROR,
+            metadata={"error_type": error_type, "original_error": str(error)}
+        )
+
+        conversation.add_message(error_message)
+        await self.memory_manager.update_from_message(error_message, user_id)
+
+        return ChatResponse(
+            conversation_id=conversation.conversation_id,
+            message=error_message,
+            research_triggered=True,
+            error_occurred=True,
+            error_details={"type": error_type, "message": str(error)}
+        )
+
+    def _categorize_research_error(self, error: Exception) -> str:
+        """Categorize research errors for better handling"""
+        error_str = str(error).lower()
+
+        if any(keyword in error_str for keyword in ["timeout", "connection", "network", "unreachable"]):
+            return "network"
+        elif any(keyword in error_str for keyword in ["parse", "json", "format", "structure"]):
+            return "parsing"
+        elif any(keyword in error_str for keyword in ["rate limit", "quota", "429"]):
+            return "rate_limit"
+        elif any(keyword in error_str for keyword in ["service", "unavailable", "503", "502"]):
+            return "service_unavailable"
+        else:
+            return "generic"
+
+    async def _create_network_error_response(self, query: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """Create response for network-related errors"""
+        response = "I encountered a network issue while researching. Let me provide some general insights based on my knowledge:\n\n"
+
+        # Try to provide basic insights from context if available
+        if context and context.get("research_entities", {}).get("mentioned_industries"):
+            industries = context["research_entities"]["mentioned_industries"][:2]
+            response += f"**Quick insights for {', '.join(industries)}:**\n\n"
+
+        response += "🔄 **Try again in a moment** - Network issues are usually temporary.\n"
+        response += "💡 **Pro tip:** You can also ask me to research specific aspects or try rephrasing your question."
+
+        return response
+
+    async def _create_parsing_error_response(self, query: str) -> str:
+        """Create response for parsing-related errors"""
+        return f"I had trouble processing the research results for '{query}'. This sometimes happens with complex queries.\n\n" \
+               "**Suggestions:**\n" \
+               "• Try breaking down your question into smaller, more specific parts\n" \
+               "• Focus on one aspect at a time\n" \
+               "• Use simpler language in your query\n\n" \
+               "Would you like me to try researching a specific part of your question?"
+
+    async def _create_rate_limit_response(self, query: str) -> str:
+        """Create response for rate limit errors"""
+        return "The research service is currently busy (rate limit reached). This is common during peak usage.\n\n" \
+               "**What you can do:**\n" \
+               "• Wait 1-2 minutes and try again\n" \
+               "• Try a simpler or more specific query\n" \
+               "• Ask about a different topic in the meantime\n\n" \
+               "I can still help with general questions while you wait!"
+
+    async def _create_service_unavailable_response(self, query: str) -> str:
+        """Create response for service unavailable errors"""
+        return "The research service is temporarily unavailable. This doesn't happen often, but it's usually resolved quickly.\n\n" \
+               "**In the meantime:**\n" \
+               "• I can answer based on my general knowledge\n" \
+               "• Try asking about a different topic\n" \
+               "• Come back in a few minutes to try your research again\n\n" \
+               "Would you like to explore another aspect of your question?"
+
+    async def _create_generic_error_response(self, query: str, error: Exception) -> str:
+        """Create response for generic errors"""
+        return f"I encountered an unexpected issue while researching '{query}'. Don't worry - this happens sometimes!\n\n" \
+               "**What you can do:**\n" \
+               "• Try rephrasing your question\n" \
+               "• Ask about a specific aspect of the topic\n" \
+               "• Check back in a moment and try again\n\n" \
+               "I'm here to help however I can in the meantime."
+
     async def _generate_suggestions(
         self,
         conversation: Conversation,

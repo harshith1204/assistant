@@ -10,30 +10,12 @@ from pydantic import BaseModel, Field
 
 class SearchAPI(Enum):
     """Enumeration of available search API providers."""
-    
+
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
-    TAVILY = "tavily"
     NONE = "none"
 
-class MCPConfig(BaseModel):
-    """Configuration for Model Context Protocol (MCP) servers."""
-    
-    url: Optional[str] = Field(
-        default=None,
-        optional=True,
-    )
-    """The URL of the MCP server"""
-    tools: Optional[List[str]] = Field(
-        default=None,
-        optional=True,
-    )
-    """The tools to make available to the LLM"""
-    auth_required: Optional[bool] = Field(
-        default=False,
-        optional=True,
-    )
-    """Whether the MCP server requires authentication"""
+
 
 class Configuration(BaseModel):
     """Main configuration class for the Deep Research agent."""
@@ -76,14 +58,13 @@ class Configuration(BaseModel):
     )
     # Research Configuration
     search_api: SearchAPI = Field(
-        default=SearchAPI.TAVILY,
+        default=SearchAPI.OPENAI,
         metadata={
             "x_oap_ui_config": {
                 "type": "select",
-                "default": "tavily",
+                "default": "openai",
                 "description": "Search API to use for research. NOTE: Make sure your Researcher Model supports the selected search API.",
                 "options": [
-                    {"label": "Tavily", "value": SearchAPI.TAVILY.value},
                     {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
                     {"label": "None", "value": SearchAPI.NONE.value}
@@ -210,27 +191,7 @@ class Configuration(BaseModel):
             }
         }
     )
-    # MCP server configuration
-    mcp_config: Optional[MCPConfig] = Field(
-        default=None,
-        optional=True,
-        metadata={
-            "x_oap_ui_config": {
-                "type": "mcp",
-                "description": "MCP server configuration"
-            }
-        }
-    )
-    mcp_prompt: Optional[str] = Field(
-        default=None,
-        optional=True,
-        metadata={
-            "x_oap_ui_config": {
-                "type": "text",
-                "description": "Any additional instructions to pass along to the Agent regarding the MCP tools that are available to it."
-            }
-        }
-    )
+
 
 
     @classmethod

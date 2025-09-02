@@ -24,153 +24,15 @@ from langchain_core.tools import (
     ToolException,
     tool,
 )
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.config import get_store
-from mcp import McpError
-from tavily import AsyncTavilyClient
 
 from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
 from open_deep_research.state import ResearchComplete, Summary
 
 ##########################
-# Tavily Search Tool Utils
+# Reflection Tool Utils
 ##########################
-TAVILY_SEARCH_DESCRIPTION = (
-    "A search engine optimized for comprehensive, accurate, and trusted results. "
-    "Useful for when you need to answer questions about current events."
-)
-@tool(description=TAVILY_SEARCH_DESCRIPTION)
-async def tavily_search(
-    queries: List[str],
-    max_results: Annotated[int, InjectedToolArg] = 5,
-    topic: Annotated[Literal["general", "news", "finance"], InjectedToolArg] = "general",
-    config: RunnableConfig = None
-) -> str:
-    """Fetch and summarize search results from Tavily search API.
-
-    Args:
-        queries: List of search queries to execute
-        max_results: Maximum number of results to return per query
-        topic: Topic filter for search results (general, news, or finance)
-        config: Runtime configuration for API keys and model settings
-
-    Returns:
-        Formatted string containing summarized search results
-    """
-    # Step 1: Execute search queries asynchronously
-    search_results = await tavily_search_async(
-        queries,
-        max_results=max_results,
-        topic=topic,
-        include_raw_content=True,
-        config=config
-    )
-    
-    # Step 2: Deduplicate results by URL to avoid processing the same content multiple times
-    unique_results = {}
-    for response in search_results:
-        for result in response['results']:
-            url = result['url']
-            if url not in unique_results:
-                unique_results[url] = {**result, "query": response['query']}
-    
-    # Step 3: Set up the summarization model with configuration
-    configurable = Configuration.from_runnable_config(config)
-    
-    # Character limit to stay within model token limits (configurable)
-    max_char_to_include = configurable.max_content_length
-    
-    # Initialize summarization model with retry logic
-    model_api_key = get_api_key_for_model(configurable.summarization_model, config)
-    summarization_model = init_chat_model(
-        model=configurable.summarization_model,
-        max_tokens=configurable.summarization_model_max_tokens,
-        api_key=model_api_key,
-        tags=["langsmith:nostream"]
-    ).with_structured_output(Summary).with_retry(
-        stop_after_attempt=configurable.max_structured_output_retries
-    )
-    
-    # Step 4: Create summarization tasks (skip empty content)
-    async def noop():
-        """No-op function for results without raw content."""
-        return None
-    
-    summarization_tasks = [
-        noop() if not result.get("raw_content") 
-        else summarize_webpage(
-            summarization_model, 
-            result['raw_content'][:max_char_to_include]
-        )
-        for result in unique_results.values()
-    ]
-    
-    # Step 5: Execute all summarization tasks in parallel
-    summaries = await asyncio.gather(*summarization_tasks)
-    
-    # Step 6: Combine results with their summaries
-    summarized_results = {
-        url: {
-            'title': result['title'], 
-            'content': result['content'] if summary is None else summary
-        }
-        for url, result, summary in zip(
-            unique_results.keys(), 
-            unique_results.values(), 
-            summaries
-        )
-    }
-    
-    # Step 7: Format the final output
-    if not summarized_results:
-        return "No valid search results found. Please try different search queries or use a different search API."
-    
-    formatted_output = "Search results: \n\n"
-    for i, (url, result) in enumerate(summarized_results.items()):
-        formatted_output += f"\n\n--- SOURCE {i+1}: {result['title']} ---\n"
-        formatted_output += f"URL: {url}\n\n"
-        formatted_output += f"SUMMARY:\n{result['content']}\n\n"
-        formatted_output += "\n\n" + "-" * 80 + "\n"
-    
-    return formatted_output
-
-async def tavily_search_async(
-    search_queries, 
-    max_results: int = 5, 
-    topic: Literal["general", "news", "finance"] = "general", 
-    include_raw_content: bool = True, 
-    config: RunnableConfig = None
-):
-    """Execute multiple Tavily search queries asynchronously.
-    
-    Args:
-        search_queries: List of search query strings to execute
-        max_results: Maximum number of results per query
-        topic: Topic category for filtering results
-        include_raw_content: Whether to include full webpage content
-        config: Runtime configuration for API key access
-        
-    Returns:
-        List of search result dictionaries from Tavily API
-    """
-    # Initialize the Tavily client with API key from config
-    tavily_client = AsyncTavilyClient(api_key=get_tavily_api_key(config))
-    
-    # Create search tasks for parallel execution
-    search_tasks = [
-        tavily_client.search(
-            query,
-            max_results=max_results,
-            include_raw_content=include_raw_content,
-            topic=topic
-        )
-        for query in search_queries
-    ]
-    
-    # Execute all search queries in parallel and return results
-    search_results = await asyncio.gather(*search_tasks)
-    return search_results
 
 async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
     """Summarize webpage content using AI model with timeout protection.
@@ -244,287 +106,6 @@ def think_tool(reflection: str) -> str:
     return f"Reflection recorded: {reflection}"
 
 ##########################
-# MCP Utils
-##########################
-
-async def get_mcp_access_token(
-    supabase_token: str,
-    base_mcp_url: str,
-) -> Optional[Dict[str, Any]]:
-    """Exchange Supabase token for MCP access token using OAuth token exchange.
-    
-    Args:
-        supabase_token: Valid Supabase authentication token
-        base_mcp_url: Base URL of the MCP server
-        
-    Returns:
-        Token data dictionary if successful, None if failed
-    """
-    try:
-        # Prepare OAuth token exchange request data
-        form_data = {
-            "client_id": "mcp_default",
-            "subject_token": supabase_token,
-            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-            "resource": base_mcp_url.rstrip("/") + "/mcp",
-            "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
-        }
-        
-        # Execute token exchange request
-        async with aiohttp.ClientSession() as session:
-            token_url = base_mcp_url.rstrip("/") + "/oauth/token"
-            headers = {"Content-Type": "application/x-www-form-urlencoded"}
-            
-            async with session.post(token_url, headers=headers, data=form_data) as response:
-                if response.status == 200:
-                    # Successfully obtained token
-                    token_data = await response.json()
-                    return token_data
-                else:
-                    # Log error details for debugging
-                    response_text = await response.text()
-                    logging.error(f"Token exchange failed: {response_text}")
-                    
-    except Exception as e:
-        logging.error(f"Error during token exchange: {e}")
-    
-    return None
-
-async def get_tokens(config: RunnableConfig):
-    """Retrieve stored authentication tokens with expiration validation.
-    
-    Args:
-        config: Runtime configuration containing thread and user identifiers
-        
-    Returns:
-        Token dictionary if valid and not expired, None otherwise
-    """
-    store = get_store()
-    
-    # Extract required identifiers from config
-    thread_id = config.get("configurable", {}).get("thread_id")
-    if not thread_id:
-        return None
-        
-    user_id = config.get("metadata", {}).get("owner")
-    if not user_id:
-        return None
-    
-    # Retrieve stored tokens
-    tokens = await store.aget((user_id, "tokens"), "data")
-    if not tokens:
-        return None
-    
-    # Check token expiration
-    expires_in = tokens.value.get("expires_in")  # seconds until expiration
-    created_at = tokens.created_at  # datetime of token creation
-    current_time = datetime.now(timezone.utc)
-    expiration_time = created_at + timedelta(seconds=expires_in)
-    
-    if current_time > expiration_time:
-        # Token expired, clean up and return None
-        await store.adelete((user_id, "tokens"), "data")
-        return None
-
-    return tokens.value
-
-async def set_tokens(config: RunnableConfig, tokens: dict[str, Any]):
-    """Store authentication tokens in the configuration store.
-    
-    Args:
-        config: Runtime configuration containing thread and user identifiers
-        tokens: Token dictionary to store
-    """
-    store = get_store()
-    
-    # Extract required identifiers from config
-    thread_id = config.get("configurable", {}).get("thread_id")
-    if not thread_id:
-        return
-        
-    user_id = config.get("metadata", {}).get("owner")
-    if not user_id:
-        return
-    
-    # Store the tokens
-    await store.aput((user_id, "tokens"), "data", tokens)
-
-async def fetch_tokens(config: RunnableConfig) -> dict[str, Any]:
-    """Fetch and refresh MCP tokens, obtaining new ones if needed.
-    
-    Args:
-        config: Runtime configuration with authentication details
-        
-    Returns:
-        Valid token dictionary, or None if unable to obtain tokens
-    """
-    # Try to get existing valid tokens first
-    current_tokens = await get_tokens(config)
-    if current_tokens:
-        return current_tokens
-    
-    # Extract Supabase token for new token exchange
-    supabase_token = config.get("configurable", {}).get("x-supabase-access-token")
-    if not supabase_token:
-        return None
-    
-    # Extract MCP configuration
-    mcp_config = config.get("configurable", {}).get("mcp_config")
-    if not mcp_config or not mcp_config.get("url"):
-        return None
-    
-    # Exchange Supabase token for MCP tokens
-    mcp_tokens = await get_mcp_access_token(supabase_token, mcp_config.get("url"))
-    if not mcp_tokens:
-        return None
-
-    # Store the new tokens and return them
-    await set_tokens(config, mcp_tokens)
-    return mcp_tokens
-
-def wrap_mcp_authenticate_tool(tool: StructuredTool) -> StructuredTool:
-    """Wrap MCP tool with comprehensive authentication and error handling.
-    
-    Args:
-        tool: The MCP structured tool to wrap
-        
-    Returns:
-        Enhanced tool with authentication error handling
-    """
-    original_coroutine = tool.coroutine
-    
-    async def authentication_wrapper(**kwargs):
-        """Enhanced coroutine with MCP error handling and user-friendly messages."""
-        
-        def _find_mcp_error_in_exception_chain(exc: BaseException) -> McpError | None:
-            """Recursively search for MCP errors in exception chains."""
-            if isinstance(exc, McpError):
-                return exc
-            
-            # Handle ExceptionGroup (Python 3.11+) by checking attributes
-            if hasattr(exc, 'exceptions'):
-                for sub_exception in exc.exceptions:
-                    if found_error := _find_mcp_error_in_exception_chain(sub_exception):
-                        return found_error
-            return None
-        
-        try:
-            # Execute the original tool functionality
-            return await original_coroutine(**kwargs)
-            
-        except BaseException as original_error:
-            # Search for MCP-specific errors in the exception chain
-            mcp_error = _find_mcp_error_in_exception_chain(original_error)
-            if not mcp_error:
-                # Not an MCP error, re-raise the original exception
-                raise original_error
-            
-            # Handle MCP-specific error cases
-            error_details = mcp_error.error
-            error_code = getattr(error_details, "code", None)
-            error_data = getattr(error_details, "data", None) or {}
-            
-            # Check for authentication/interaction required error
-            if error_code == -32003:  # Interaction required error code
-                message_payload = error_data.get("message", {})
-                error_message = "Required interaction"
-                
-                # Extract user-friendly message if available
-                if isinstance(message_payload, dict):
-                    error_message = message_payload.get("text") or error_message
-                
-                # Append URL if provided for user reference
-                if url := error_data.get("url"):
-                    error_message = f"{error_message} {url}"
-                
-                raise ToolException(error_message) from original_error
-            
-            # For other MCP errors, re-raise the original
-            raise original_error
-    
-    # Replace the tool's coroutine with our enhanced version
-    tool.coroutine = authentication_wrapper
-    return tool
-
-async def load_mcp_tools(
-    config: RunnableConfig,
-    existing_tool_names: set[str],
-) -> list[BaseTool]:
-    """Load and configure MCP (Model Context Protocol) tools with authentication.
-    
-    Args:
-        config: Runtime configuration containing MCP server details
-        existing_tool_names: Set of tool names already in use to avoid conflicts
-        
-    Returns:
-        List of configured MCP tools ready for use
-    """
-    configurable = Configuration.from_runnable_config(config)
-    
-    # Step 1: Handle authentication if required
-    if configurable.mcp_config and configurable.mcp_config.auth_required:
-        mcp_tokens = await fetch_tokens(config)
-    else:
-        mcp_tokens = None
-    
-    # Step 2: Validate configuration requirements
-    config_valid = (
-        configurable.mcp_config and 
-        configurable.mcp_config.url and 
-        configurable.mcp_config.tools and 
-        (mcp_tokens or not configurable.mcp_config.auth_required)
-    )
-    
-    if not config_valid:
-        return []
-    
-    # Step 3: Set up MCP server connection
-    server_url = configurable.mcp_config.url.rstrip("/") + "/mcp"
-    
-    # Configure authentication headers if tokens are available
-    auth_headers = None
-    if mcp_tokens:
-        auth_headers = {"Authorization": f"Bearer {mcp_tokens['access_token']}"}
-    
-    mcp_server_config = {
-        "server_1": {
-            "url": server_url,
-            "headers": auth_headers,
-            "transport": "streamable_http"
-        }
-    }
-    # TODO: When Multi-MCP Server support is merged in OAP, update this code
-    
-    # Step 4: Load tools from MCP server
-    try:
-        client = MultiServerMCPClient(mcp_server_config)
-        available_mcp_tools = await client.get_tools()
-    except Exception:
-        # If MCP server connection fails, return empty list
-        return []
-    
-    # Step 5: Filter and configure tools
-    configured_tools = []
-    for mcp_tool in available_mcp_tools:
-        # Skip tools with conflicting names
-        if mcp_tool.name in existing_tool_names:
-            warnings.warn(
-                f"MCP tool '{mcp_tool.name}' conflicts with existing tool name - skipping"
-            )
-            continue
-        
-        # Only include tools specified in configuration
-        if mcp_tool.name not in set(configurable.mcp_config.tools):
-            continue
-        
-        # Wrap tool with authentication handling and add to list
-        enhanced_tool = wrap_mcp_authenticate_tool(mcp_tool)
-        configured_tools.append(enhanced_tool)
-    
-    return configured_tools
-
-
-##########################
 # Tool Utils
 ##########################
 
@@ -548,17 +129,7 @@ async def get_search_tool(search_api: SearchAPI):
     elif search_api == SearchAPI.OPENAI:
         # OpenAI's web search preview functionality
         return [{"type": "web_search_preview"}]
-        
-    elif search_api == SearchAPI.TAVILY:
-        # Configure Tavily search tool with metadata
-        search_tool = tavily_search
-        search_tool.metadata = {
-            **(search_tool.metadata or {}), 
-            "type": "search", 
-            "name": "web_search"
-        }
-        return [search_tool]
-        
+
     elif search_api == SearchAPI.NONE:
         # No search functionality configured
         return []
@@ -567,10 +138,10 @@ async def get_search_tool(search_api: SearchAPI):
     return []
     
 async def get_all_tools(config: RunnableConfig):
-    """Assemble complete toolkit including research, search, and MCP tools.
-    
+    """Assemble complete toolkit including research and search tools.
+
     Args:
-        config: Runtime configuration specifying search API and MCP settings
+        config: Runtime configuration specifying search API settings
         
     Returns:
         List of all configured and available tools for research operations
@@ -590,9 +161,7 @@ async def get_all_tools(config: RunnableConfig):
         for tool in tools
     }
     
-    # Add MCP tools if configured
-    mcp_tools = await load_mcp_tools(config, existing_tool_names)
-    tools.extend(mcp_tools)
+
     
     return tools
 
@@ -913,13 +482,4 @@ def get_api_key_for_model(model_name: str, config: RunnableConfig):
             return os.getenv("GOOGLE_API_KEY")
         return None
 
-def get_tavily_api_key(config: RunnableConfig):
-    """Get Tavily API key from environment or config."""
-    should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false")
-    if should_get_from_config.lower() == "true":
-        api_keys = config.get("configurable", {}).get("apiKeys", {})
-        if not api_keys:
-            return None
-        return api_keys.get("TAVILY_API_KEY")
-    else:
-        return os.getenv("TAVILY_API_KEY")
+

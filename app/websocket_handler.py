@@ -222,11 +222,44 @@ class ConnectionManager:
                             data=final_message
                         )
                     )
-                elif event_type in ["research.started", "research.done", "memory.written"]:
+                elif event_type in ["research.started", "research.done", "memory.written", "memory.used"]:
                     # Forward research/memory events
                     await self.send_message(
                         connection_id,
                         WebSocketMessage(type=event_type, data=event)
+                    )
+                elif event_type == "research.chunk":
+                    # Forward research progress chunks
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(type="research_progress", data={
+                            "content": event.get("content", ""),
+                            "conversation_id": request.conversation_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
+                    )
+                elif event_type == "research_progress":
+                    # Enhanced research progress event
+                    progress_data = event.get("data", {})
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(type="research_progress", data={
+                            "content": event.get("content", "Research in progress..."),
+                            "sources_count": progress_data.get("sources_count", 0),
+                            "conversation_id": request.conversation_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
+                    )
+                elif event_type == "error" and event.get("stage") == "research":
+                    # Handle research-specific errors
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(type="research_error", data={
+                            "error": event.get("message", "Research failed"),
+                            "error_type": event.get("error_type", "unknown"),
+                            "conversation_id": request.conversation_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
                     )
 
             # If no events were received, send a fallback response

@@ -364,9 +364,9 @@ supervisor_subgraph = supervisor_builder.compile()
 
 async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[Literal["researcher_tools"]]:
     """Individual researcher that conducts focused research on specific topics.
-    
+
     This researcher is given a specific research topic by the supervisor and uses
-    available tools (search, think_tool, MCP tools) to gather comprehensive information.
+    available tools (search, think_tool) to gather comprehensive information.
     It can use think_tool for strategic planning between searches.
     
     Args:
@@ -380,12 +380,11 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
     configurable = Configuration.from_runnable_config(config)
     researcher_messages = state.get("researcher_messages", [])
     
-    # Get all available research tools (search, MCP, think_tool)
+    # Get all available research tools (search, think_tool)
     tools = await get_all_tools(config)
     if len(tools) == 0:
         raise ValueError(
-            "No tools found to conduct research: Please configure either your "
-            "search API or add MCP tools to your configuration."
+            "No tools found to conduct research: Please configure your search API."
         )
     
     # Step 2: Configure the researcher model with tools
@@ -396,9 +395,8 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         "tags": ["langsmith:nostream"]
     }
     
-    # Prepare system prompt with MCP context if available
+    # Prepare system prompt
     researcher_prompt = research_system_prompt.format(
-        mcp_prompt=configurable.mcp_prompt or "", 
         date=get_today_str()
     )
     
@@ -434,12 +432,11 @@ async def execute_tool_safely(tool, args, config):
 
 async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Command[Literal["researcher", "compress_research"]]:
     """Execute tools called by the researcher, including search tools and strategic thinking.
-    
+
     This function handles various types of researcher tool calls:
     1. think_tool - Strategic reflection that continues the research conversation
-    2. Search tools (tavily_search, web_search) - Information gathering
-    3. MCP tools - External tool integrations
-    4. ResearchComplete - Signals completion of individual research task
+    2. Search tools - Information gathering
+    3. ResearchComplete - Signals completion of individual research task
     
     Args:
         state: Current researcher state with messages and iteration count
@@ -463,7 +460,7 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     if not has_tool_calls and not has_native_search:
         return Command(goto="compress_research")
     
-    # Step 2: Handle other tool calls (search, MCP tools, etc.)
+    # Step 2: Handle other tool calls (search tools, etc.)
     tools = await get_all_tools(config)
     tools_by_name = {
         tool.name if hasattr(tool, "name") else tool.get("name", "web_search"): tool 
