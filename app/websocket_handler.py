@@ -134,6 +134,7 @@ class ConnectionManager:
             request = ChatRequest(
                 message=message_text,
                 conversation_id=conversation_id,
+                user_id=user_id,  # Add user_id to request for profile loading
                 use_web_search=is_research,
                 stream=stream
             )

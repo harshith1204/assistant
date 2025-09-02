@@ -403,7 +403,12 @@ class IntentDetector:
         message_lower = message.lower()
 
         # Profile update patterns
-        if any(phrase in message_lower for phrase in ["remember that", "save that", "note that", "i am", "i prefer", "my name is"]):
+        profile_phrases = [
+            "remember that", "save that", "note that", "i am", "i prefer", "my name is",
+            "call me", "refer to me", "address me", "you can call me", "i go by",
+            "people call me", "i'm known as", "my preferred name"
+        ]
+        if any(phrase in message_lower for phrase in profile_phrases):
             return {
                 "label": "profile_update",
                 "confidence": 0.8,
@@ -441,6 +446,11 @@ class IntentDetector:
         import re
         patterns = [
             (r"my name is (\w+)", "name"),
+            (r"i'm known as (\w+)", "name"),
+            (r"call me (\w+)", "name"),
+            (r"refer to me as (\w+)", "name"),
+            (r"you can call me (\w+)", "name"),
+            (r"i go by (\w+)", "name"),
             (r"i prefer (.*?)(?:\.|$)", "preference"),
             (r"i am (.*?)(?:\.|$)", "description"),
             (r"i work at (.*?)(?:\.|$)", "workplace"),

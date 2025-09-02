@@ -207,6 +207,7 @@ class ChatEngine:
             confidence = intent_result.get("confidence", 0.5)
             entities = intent_result.get("entities", {})
 
+
             # Low confidence - request clarification
             if confidence < 0.5 and not request.skip_clarification:
                 yield {
@@ -225,7 +226,7 @@ class ChatEngine:
 
             # ===== STAGE 4: EXECUTE =====
             research_notes: Optional[str] = None
-            
+
             # Handle profile update intent
             if intent == "profile_update" and entities.get("profile_facts"):
                 for fact in entities.get("profile_facts", []):
@@ -806,7 +807,6 @@ class ChatEngine:
         profile: List[Dict[str, Any]] = []
         if user_id:
             profile = await self.memory_manager.get_profile(user_id)
-            logger.info(f"Loaded {len(profile)} profile facts for user {user_id}")
         context["profile"] = profile
 
         # Search both user and conversation memories if enabled
