@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     rate_limit_period: int = Field(3600, env="RATE_LIMIT_PERIOD")
     
     # LLM Settings
-    llm_model: str = Field("llama3-8b-8192", env="LLM_MODEL")
+    llm_model: str = Field("openai/gpt-oss-120b", env="LLM_MODEL")
     llm_temperature: float = Field(0.2, env="LLM_TEMPERATURE")
     llm_max_tokens: int = Field(4000, env="LLM_MAX_TOKENS")
     
@@ -87,6 +87,26 @@ class Settings(BaseSettings):
     max_conversation_history: int = Field(100, env="MAX_CONVERSATION_HISTORY")
     default_context_window: int = Field(10, env="DEFAULT_CONTEXT_WINDOW")
     
+    # MongoDB MCP Configuration
+    mongodb_mcp_enabled: bool = Field(True, env="MONGODB_MCP_ENABLED")
+    mongodb_mcp_server_url: str = Field("http://localhost:3000", env="MONGODB_MCP_SERVER_URL")  # MongoDB MCP Server endpoint
+    mongodb_connection_string: str = Field("", env="MONGODB_CONNECTION_STRING")
+    mongodb_database: str = Field("default", env="MONGODB_DATABASE")
+    mongodb_readonly_user: str = Field("", env="MONGODB_READONLY_USER")
+    mongodb_readonly_password: str = Field("", env="MONGODB_READONLY_PASSWORD")
+
+    # MongoDB MCP Security & Limits
+    mongodb_allowed_collections: List[str] = Field(["users", "products", "orders", "analytics"], env="MONGODB_ALLOWED_COLLECTIONS")
+    mongodb_max_rows_per_query: int = Field(1000, env="MONGODB_MAX_ROWS_PER_QUERY")
+    mongodb_query_timeout_seconds: int = Field(30, env="MONGODB_QUERY_TIMEOUT_SECONDS")
+    mongodb_tenant_field: str = Field("tenantId", env="MONGODB_TENANT_FIELD")
+
+    # Atlas Vector Search Configuration
+    mongodb_vector_search_enabled: bool = Field(False, env="MONGODB_VECTOR_SEARCH_ENABLED")
+    mongodb_vector_index_name: str = Field("doc_chunks_v1", env="MONGODB_VECTOR_INDEX_NAME")
+    mongodb_vector_path: str = Field("embedding", env="MONGODB_VECTOR_PATH")
+    mongodb_vector_dimensions: int = Field(1536, env="MONGODB_VECTOR_DIMENSIONS")
+
     # Session settings
     secret_key: str = Field(default_factory=lambda: ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)), env="SECRET_KEY")
     session_expire_minutes: int = Field(1440, env="SESSION_EXPIRE_MINUTES")  # 24 hours

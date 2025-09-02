@@ -68,3 +68,8 @@ python-engineio
 python-jose[cryptography]
 passlib
 bcrypt
+
+# MongoDB MCP Integration
+mcp
+pymongo
+motor

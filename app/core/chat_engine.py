@@ -23,6 +23,7 @@ from app.core.intent import (
 )
 from app.integrations.crm_client import CRMClient
 from app.integrations.pms_client import PMSClient
+from app.integrations.mcp_client import mongodb_mcp_client
 
 logger = structlog.get_logger()
 
@@ -41,6 +42,7 @@ class ChatEngine:
         self.intent_detector = IntentDetector()
         self.crm_client = CRMClient()
         self.pms_client = PMSClient()
+        self.mongodb_client = mongodb_mcp_client
         self.conversations: Dict[str, Conversation] = {}
         self._turn_counters: Dict[str, int] = {}
         self._cancel_signals: Dict[str, asyncio.Event] = {}
@@ -51,6 +53,7 @@ class ChatEngine:
             "research_engine": self._handle_research_action,
             "crm_client": self._handle_crm_action,
             "pms_client": self._handle_pms_action,
+            "mongodb_client": self._handle_mongodb_action,
             "report_generator": self._handle_report_action,
             "calendar_manager": self._handle_calendar_action,
             "chat_engine": self._handle_chat_action
@@ -246,6 +249,33 @@ class ChatEngine:
                     "message": {"content": "I've updated your profile with the information you provided.", "role": MessageRole.ASSISTANT.value}
                 }
                 return
+
+            # MongoDB-first strategy
+            if routing_strategy == "mongodb-first" and not cancel_signal.is_set():
+                yield {"type": "mongodb.started", "conversation_id": conversation.conversation_id}
+                try:
+                    # Call the MongoDB handler directly for streaming
+                    routing_info = {
+                        "intent": intent,
+                        "entities": entities,
+                        "parameters": {},
+                        "handler": "mongodb_client"
+                    }
+                    async for chunk in self._handle_mongodb_action(routing_info, conversation, user_id):
+                        yield {
+                            "type": "mongodb.chunk",
+                            "conversation_id": conversation.conversation_id,
+                            "data": chunk
+                        }
+                    yield {
+                        "type": "mongodb.done",
+                        "conversation_id": conversation.conversation_id,
+                        "intent": intent,
+                        "entities": entities
+                    }
+                except Exception as e:
+                    logger.error("MongoDB stage failed", error=str(e))
+                    yield {"type": "error", "stage": "mongodb", "message": str(e)}
 
             # Research-first strategy
             if routing_strategy == "research-first" and not cancel_signal.is_set():
@@ -714,6 +744,112 @@ class ChatEngine:
         except Exception as e:
             logger.error("PMS action failed", error=str(e))
             yield {"type": "error", "content": f"Project action failed: {str(e)}"}
+
+    async def _handle_mongodb_action(
+        self,
+        routing: Dict[str, Any],
+        conversation: Conversation,
+        user_id: Optional[str]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Handle MongoDB database operations via MCP"""
+        intent = routing.get("intent", "")
+        entities = routing.get("entities", {})
+        params = routing.get("parameters", {})
+
+        try:
+            # Extract collection and query details from entities
+            collections = entities.get("collections", [])
+            collection = collections[0] if collections else params.get("collection", "default")
+
+            # Determine operation type from intent
+            if intent == "db.find":
+                yield {"type": "mongodb_started", "content": f"Searching documents in collection '{collection}'...", "operation": "find"}
+
+                # Build filter from entities
+                filter_query = params.get("filter", {})
+                if entities.get("queries"):
+                    # Simple query parsing - could be enhanced
+                    filter_query.update({"$text": {"$search": " ".join(entities["queries"])}})
+
+                async for result in self.mongodb_client.find_documents(
+                    collection=collection,
+                    filter_query=filter_query,
+                    limit=params.get("limit", 10),
+                    user_id=user_id
+                ):
+                    yield result
+
+            elif intent == "db.aggregate":
+                yield {"type": "mongodb_started", "content": f"Running aggregation on collection '{collection}'...", "operation": "aggregate"}
+
+                # Build aggregation pipeline
+                pipeline = params.get("pipeline", [])
+
+                # Add basic aggregation if none specified
+                if not pipeline and entities.get("queries"):
+                    pipeline = [
+                        {"$match": {"$text": {"$search": " ".join(entities["queries"])}}},
+                        {"$limit": 10}
+                    ]
+
+                async for result in self.mongodb_client.aggregate_documents(
+                    collection=collection,
+                    pipeline=pipeline,
+                    user_id=user_id
+                ):
+                    yield result
+
+            elif intent == "db.vectorSearch":
+                if not settings.mongodb_vector_search_enabled:
+                    yield {"type": "error", "content": "Vector search is not enabled in configuration"}
+                    return
+
+                yield {"type": "mongodb_started", "content": f"Performing vector search in collection '{collection}'...", "operation": "vectorSearch"}
+
+                # For vector search, we'd need to generate embeddings from the query
+                # This is a simplified example - in practice, you'd use an embedding service
+                query_text = " ".join(entities.get("queries", []))
+                if not query_text:
+                    query_text = conversation.messages[-1].content if conversation.messages else ""
+
+                # Placeholder for embedding generation
+                # In practice, you'd call your embedding service here
+                query_vector = [0.1] * settings.mongodb_vector_dimensions  # Placeholder
+
+                async for result in self.mongodb_client.vector_search(
+                    collection=collection,
+                    query_vector=query_vector,
+                    limit=params.get("limit", 5),
+                    user_id=user_id
+                ):
+                    yield result
+
+            elif intent == "db.runCommand":
+                yield {"type": "mongodb_started", "content": "Running MongoDB command...", "operation": "runCommand"}
+
+                command = params.get("command", {})
+                async for result in self.mongodb_client.run_command(
+                    command=command,
+                    user_id=user_id
+                ):
+                    yield result
+
+            else:
+                yield {
+                    "type": "mongodb_info",
+                    "content": f"I can help you query the database. I detected intent: {intent}. Available operations: find, aggregate, vector search, run command. What would you like to do?"
+                }
+
+            # Add sources used information
+            if collection:
+                yield {
+                    "type": "sources.used",
+                    "sources": [{"type": "mongodb", "collection": collection, "database": settings.mongodb_database}]
+                }
+
+        except Exception as e:
+            logger.error("MongoDB action failed", error=str(e), intent=intent)
+            yield {"type": "error", "content": f"Database operation failed: {str(e)}", "operation": intent}
     
     async def _handle_report_action(
         self,
@@ -1694,14 +1830,18 @@ Provide 3 short, specific questions that would naturally continue the conversati
         context: Dict[str, Any]
     ) -> str:
         """Determine routing strategy based on intent and context"""
+        # MongoDB database intents
+        if intent.startswith("db."):
+            return "mongodb-first"
+
         # Explicit research request
         if request.use_web_search or intent == "research":
             return "research-first"
-        
+
         # Profile update intent
         if intent == "profile_update":
             return "profile-update"
-        
+
         # Check for research indicators in message
         research_keywords = [
             "research", "find out", "look up", "search for",
@@ -1712,7 +1852,7 @@ Provide 3 short, specific questions that would naturally continue the conversati
         message_lower = request.message.lower()
         if any(keyword in message_lower for keyword in research_keywords):
             return "research-first"
-        
+
         # Default to direct answer
         return "direct-answer"
     

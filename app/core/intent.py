@@ -29,6 +29,13 @@ class ConversationalIntent(Enum):
     CONFIRMATION = "confirmation"
     CANCELLATION = "cancellation"
 
+    # MongoDB Database Intents
+    DB_FIND = "db.find"
+    DB_AGGREGATE = "db.aggregate"
+    DB_VECTOR_SEARCH = "db.vectorSearch"
+    DB_RUN_COMMAND = "db.runCommand"
+    DB_QUERY = "db.query"
+
 
 class ActionType(Enum):
     """Specific action types within intents"""
@@ -99,6 +106,29 @@ class ConversationalIntentDetector:
                 r'\b(meeting|appointment|call|demo|discussion)\b',
                 r'\b(schedule|book|arrange|set up)\b',
                 r'\b(calendar|availability|time slot)\b'
+            ],
+            ConversationalIntent.DB_FIND: [
+                r'\b(find|search|get|lookup|query)\b.*\b(records?|documents?|entries?|data)\b',
+                r'\b(show me|list|display)\b.*\b(from|in)\b.*\b(database|collection|table)\b',
+                r'\b(how many|count)\b.*\b(in|from)\b.*\b(collection|database)\b'
+            ],
+            ConversationalIntent.DB_AGGREGATE: [
+                r'\b(aggregate|group|sum|average|count|statistics|analytics)\b',
+                r'\b(group by|aggregate by|summarize)\b.*\b(data|records)\b',
+                r'\b(calculate|compute)\b.*\b(totals?|averages?|counts?|metrics)\b'
+            ],
+            ConversationalIntent.DB_VECTOR_SEARCH: [
+                r'\b(similar|related|semantic|vector)\b.*\b(search|find|query)\b',
+                r'\b(find documents?|search content)\b.*\b(about|related to|similar to)\b',
+                r'\b(what.*like|similar to|related to)\b'
+            ],
+            ConversationalIntent.DB_RUN_COMMAND: [
+                r'\b(run|execute)\b.*\b(command|query|operation)\b',
+                r'\b(database|system)\b.*\b(command|info|status)\b'
+            ],
+            ConversationalIntent.DB_QUERY: [
+                r'\b(query|search|find|get)\b.*\b(database|collection|data)\b',
+                r'\b(look up|retrieve|fetch)\b.*\b(from|in)\b.*\b(database|collection)\b'
             ]
         }
     
@@ -137,10 +167,10 @@ class ConversationalIntentDetector:
         """Deep intent analysis using LLM"""
         
         system_prompt = """You are a conversational intent analyzer. Analyze the user's message and determine:
-1. Primary intent (research, crm_action, pms_action, report_generation, meeting_scheduling, general_chat)
+1. Primary intent (research, crm_action, pms_action, report_generation, meeting_scheduling, db.find, db.aggregate, db.vectorSearch, db.runCommand, db.query, general_chat)
 2. Specific action needed
-3. Entities mentioned (names, dates, topics, etc.)
-4. Parameters for the action
+3. Entities mentioned (names, dates, topics, database collections, etc.)
+4. Parameters for the action (including database/collection names for DB intents)
 5. Confidence level (0-1)
 6. Whether clarification is needed
 
@@ -156,6 +186,10 @@ Return ONLY valid JSON:
         "organizations": [],
         "dates": [],
         "locations": [],
+        "collections": [],
+        "databases": [],
+        "queries": [],
+        "filters": {},
         "other": {}
     },
     "parameters": {
@@ -361,6 +395,11 @@ class ConversationalRouter:
             "pms_action": "pms_client",
             "report_generation": "report_generator",
             "meeting_scheduling": "calendar_manager",
+            "db.find": "mongodb_client",
+            "db.aggregate": "mongodb_client",
+            "db.vectorSearch": "mongodb_client",
+            "db.runCommand": "mongodb_client",
+            "db.query": "mongodb_client",
             "general_chat": "chat_engine"
         }
         return handlers.get(intent, "chat_engine")
