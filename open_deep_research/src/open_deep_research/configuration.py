@@ -23,7 +23,7 @@ class Configuration(BaseModel):
     # General Configuration
     max_structured_output_retries: int = Field(
         default=3,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 3,
@@ -35,7 +35,7 @@ class Configuration(BaseModel):
     )
     allow_clarification: bool = Field(
         default=True,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "boolean",
                 "default": True,
@@ -45,7 +45,7 @@ class Configuration(BaseModel):
     )
     max_concurrent_research_units: int = Field(
         default=5,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "slider",
                 "default": 5,
@@ -59,7 +59,7 @@ class Configuration(BaseModel):
     # Research Configuration
     search_api: SearchAPI = Field(
         default=SearchAPI.OPENAI,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "select",
                 "default": "openai",
@@ -74,7 +74,7 @@ class Configuration(BaseModel):
     )
     max_researcher_iterations: int = Field(
         default=6,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "slider",
                 "default": 6,
@@ -87,7 +87,7 @@ class Configuration(BaseModel):
     )
     max_react_tool_calls: int = Field(
         default=10,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "slider",
                 "default": 10,
@@ -101,7 +101,7 @@ class Configuration(BaseModel):
     # Model Configuration
     summarization_model: str = Field(
         default="openai:gpt-4.1-mini",
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
                 "default": "openai:gpt-4.1-mini",
@@ -111,7 +111,7 @@ class Configuration(BaseModel):
     )
     summarization_model_max_tokens: int = Field(
         default=8192,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 8192,
@@ -121,7 +121,7 @@ class Configuration(BaseModel):
     )
     max_content_length: int = Field(
         default=50000,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 50000,
@@ -133,7 +133,7 @@ class Configuration(BaseModel):
     )
     research_model: str = Field(
         default="openai:gpt-4.1",
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
                 "default": "openai:gpt-4.1",
@@ -143,7 +143,7 @@ class Configuration(BaseModel):
     )
     research_model_max_tokens: int = Field(
         default=10000,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 10000,
@@ -153,7 +153,7 @@ class Configuration(BaseModel):
     )
     compression_model: str = Field(
         default="openai:gpt-4.1",
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
                 "default": "openai:gpt-4.1",
@@ -163,7 +163,7 @@ class Configuration(BaseModel):
     )
     compression_model_max_tokens: int = Field(
         default=8192,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 8192,
@@ -173,7 +173,7 @@ class Configuration(BaseModel):
     )
     final_report_model: str = Field(
         default="openai:gpt-4.1",
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
                 "default": "openai:gpt-4.1",
@@ -183,7 +183,7 @@ class Configuration(BaseModel):
     )
     final_report_model_max_tokens: int = Field(
         default=10000,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 10000,

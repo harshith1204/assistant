@@ -1,5 +1,6 @@
 """Main FastAPI application for Conversational Chat Engine"""
 
+import warnings
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 import asyncio
@@ -12,6 +13,12 @@ import uvicorn
 from app.config import settings
 from app.core.chat_engine import ChatEngine
 from app.websocket_handler import websocket_endpoint
+
+# Suppress websockets library deprecation warning
+warnings.filterwarnings("ignore", message="remove second argument of ws_handler", category=DeprecationWarning, module="websockets")
+
+# Suppress Pydantic class-based config warning
+warnings.filterwarnings("ignore", message="Support for class-based `config` is deprecated", category=DeprecationWarning, module="pydantic")
 
 # Configure logging
 import logging

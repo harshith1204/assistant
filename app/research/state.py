@@ -107,7 +107,7 @@ class BusinessResearchBrief(ResearchBrief):
     conversation_context_id: Optional[str] = None
 
     # Quality and validation
-    research_quality_score: float = Field(0.0, ge=0.0, le=1.0)
+    research_quality_score: float = Field(0.0, ge=0.0, le=1.0, json_schema_extra={"description": "Research quality score"})
     validation_status: str = "pending"  # pending, validated, needs_review
     reviewer_notes: Optional[str] = None
 
@@ -174,13 +174,13 @@ class BusinessIdea(Idea):
 
     # Business-specific fields
     target_market_size: Optional[int] = None
-    market_penetration_potential: float = Field(0.0, ge=0.0, le=1.0)
+    market_penetration_potential: float = Field(0.0, ge=0.0, le=1.0, json_schema_extra={"description": "Market penetration potential"})
     competitive_advantage: Optional[str] = None
     regulatory_requirements: List[str] = []
     partnership_opportunities: List[str] = []
 
     # Strategic alignment
-    strategic_alignment_score: float = Field(0.0, ge=0.0, le=5.0)
+    strategic_alignment_score: float = Field(0.0, ge=0.0, le=5.0, json_schema_extra={"description": "Strategic alignment score"})
     risk_level: Literal["low", "medium", "high"] = "medium"
     time_to_market_months: Optional[int] = None
 
@@ -215,7 +215,7 @@ class BusinessFinding(Finding):
 
     # Business context
     business_impact: Literal["low", "medium", "high", "critical"] = "medium"
-    strategic_importance: float = Field(0.0, ge=0.0, le=5.0)
+    strategic_importance: float = Field(0.0, ge=0.0, le=5.0, json_schema_extra={"description": "Strategic importance score"})
     action_required: bool = False
     action_deadline: Optional[datetime] = None
 

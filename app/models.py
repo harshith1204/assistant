@@ -43,7 +43,7 @@ class Evidence(BaseModel):
     author: Optional[str] = Field(None, description="Author name")
     published: Optional[datetime] = Field(None, description="Publication date")
     source_type: SourceType = Field(SourceType.WEB, description="Type of source")
-    credibility_score: float = Field(0.5, ge=0, le=1, description="Credibility score")
+    credibility_score: float = Field(0.5, ge=0, le=1, json_schema_extra={"description": "Credibility score"})
 
 
 class Finding(BaseModel):
@@ -51,7 +51,7 @@ class Finding(BaseModel):
     title: str = Field(..., description="Finding title")
     summary: str = Field(..., description="Finding summary")
     evidence: List[Evidence] = Field([], description="Supporting evidence")
-    confidence: float = Field(0.5, ge=0, le=1, description="Confidence score")
+    confidence: float = Field(0.5, ge=0, le=1, json_schema_extra={"description": "Confidence score"})
     recency: str = Field("unknown", description="Recency indicator")
     scope: ResearchScope = Field(ResearchScope.MARKET, description="Research scope")
     key_insights: List[str] = Field([], description="Key insights")
@@ -59,10 +59,10 @@ class Finding(BaseModel):
 
 class RICEScore(BaseModel):
     """RICE scoring for ideas"""
-    reach: int = Field(..., ge=0, description="Number of people/entities affected")
-    impact: int = Field(..., ge=1, le=3, description="Impact level (1-3)")
-    confidence: float = Field(..., ge=0, le=1, description="Confidence in estimates")
-    effort: int = Field(..., ge=1, description="Effort in person-days")
+    reach: int = Field(..., ge=0, json_schema_extra={"description": "Number of people/entities affected"})
+    impact: int = Field(..., ge=1, le=3, json_schema_extra={"description": "Impact level (1-3)"})
+    confidence: float = Field(..., ge=0, le=1, json_schema_extra={"description": "Confidence in estimates"})
+    effort: int = Field(..., ge=1, json_schema_extra={"description": "Effort in person-days"})
     score: Optional[float] = Field(None, description="Calculated RICE score")
     
     def calculate_score(self) -> float:
@@ -145,7 +145,7 @@ class PlanRequest(BaseModel):
 class ResearchStatus(BaseModel):
     """Status of research operation"""
     status: str = Field(..., description="Status")
-    progress: float = Field(0, ge=0, le=100, description="Progress percentage")
+    progress: float = Field(0, ge=0, le=100, json_schema_extra={"description": "Progress percentage"})
     current_step: str = Field("", description="Current step")
     errors: List[str] = Field([], description="Errors encountered")
     warnings: List[str] = Field([], description="Warnings")
