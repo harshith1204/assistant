@@ -12,9 +12,9 @@ from app.models import (
     Finding, Idea, Evidence
 )
 from app.core.query_understanding import QueryUnderstanding
-from app.core.web_research import WebResearchPipeline
 from app.core.synthesis import ResearchSynthesizer
 from app.integrations.mcp_client import mongodb_mcp_client
+from app.research.service import ResearchService
 
 logger = structlog.get_logger()
 
@@ -26,6 +26,7 @@ class ResearchEngine:
         self.query_understanding = QueryUnderstanding()
         self.synthesizer = ResearchSynthesizer()
         self.mcp_client = mongodb_mcp_client
+        self.research_service = ResearchService()
         self.status = ResearchStatus(status="idle", progress=0)
     
     async def run_research(self, request: ResearchRequest) -> ResearchBrief:
@@ -57,92 +58,53 @@ class ResearchEngine:
             subqueries = await self.query_understanding.expand_to_subqueries(sanitized_query, parsed)
             key_questions = await self.query_understanding.generate_key_questions(sanitized_query, parsed)
             
-            # Step 3: Search and fetch sources (50%)
-            self.status.current_step = "Searching sources"
+            # Step 3: Use ResearchService for research (50%)
+            self.status.current_step = "Conducting research"
             self.status.progress = 30
-            
-            async with WebResearchPipeline() as pipeline:
-                # Search for sources
-                search_results = await pipeline.search_sources(
-                    subqueries,
-                    max_results=request.max_sources or settings.max_sources_per_query
-                )
-                
-                self.status.current_step = "Fetching content"
-                self.status.progress = 40
-                
-                # Fetch content from sources
-                fetch_tasks = [
-                    pipeline.fetch_content(result['url'])
-                    for result in search_results
-                ]
-                sources = await asyncio.gather(*fetch_tasks)
-                
-                # Filter out None results
-                sources = [s for s in sources if s]
-                
-                # Deduplicate and cluster
-                self.status.current_step = "Processing sources"
-                self.status.progress = 50
-                
-                sources = pipeline.deduplicate_sources(sources)
-                clustered_sources = pipeline.cluster_by_topic(sources)
-                
-                # Extract evidence
-                all_evidence = []
-                for source in sources:
-                    evidence = await pipeline.extract_facts(source, sanitized_query)
-                    all_evidence.extend(evidence)
-            
-            # Step 4: Synthesize findings (70%)
-            self.status.current_step = "Synthesizing findings"
-            self.status.progress = 60
-            
-            findings = await self.synthesizer.synthesize_findings(
-                clustered_sources,
-                sanitized_query,
-                key_questions
+
+            # Check MCP availability for enhanced research
+            mcp_available = False
+            try:
+                mcp_health = await self.mcp_client.health_check()
+                mcp_available = mcp_health.get("status") == "connected"
+                if mcp_available:
+                    logger.info("MCP client available for research enhancement", tools=mcp_health.get("available_tools", 0))
+            except Exception as e:
+                logger.warning("MCP health check failed, proceeding without MCP", error=str(e))
+
+            # Use the working ResearchService instead of broken WebResearchPipeline
+            research_brief = await self.research_service.research(
+                query=sanitized_query,
+                scope=request.scope,
+                industry=request.industry,
+                geography=request.geo,
+                max_sources=request.max_sources or settings.max_sources_per_query,
+                mcp_available=mcp_available
             )
-            
-            # Add evidence to findings
-            for finding in findings:
-                # Match evidence to findings by topic/scope
-                relevant_evidence = [
-                    e for e in all_evidence
-                    if self._is_evidence_relevant(e, finding)
-                ][:5]  # Limit to 5 evidence per finding
-                finding.evidence = relevant_evidence
-            
-            # Step 5: Generate ideas (80%)
-            self.status.current_step = "Generating ideas"
+
+            # Extract findings and ideas from the research brief
+            findings = research_brief.findings
+            ideas = research_brief.ideas
+
+            # Enhance with MCP data if available
+            if mcp_available:
+                self.status.current_step = "Enhancing with database data"
+                self.status.progress = 60
+                research_brief = await self.enhance_research_with_mcp_data(research_brief, sanitized_query)
+                findings = research_brief.findings  # Update with enhanced findings
+
             self.status.progress = 70
-            
-            business_context = {
-                "geography": parsed.get('geography'),
-                "industry": parsed.get('industry'),
-                "timeframe": request.timeframe
-            }
-            
-            ideas = await self.synthesizer.generate_ideas(
-                findings,
-                sanitized_query,
-                business_context
-            )
-            
-            # Step 6: Generate executive summary (90%)
-            self.status.current_step = "Creating summary"
+
+            # Step 4: Use executive summary from research brief (80%)
+            self.status.current_step = "Finalizing results"
             self.status.progress = 80
+
+            executive_summary = research_brief.executive_summary
             
-            executive_summary = await self.synthesizer.generate_executive_summary(
-                findings,
-                ideas,
-                sanitized_query
-            )
-            
-            # Step 7: Create research brief (100%)
+            # Step 5: Create research brief (100%)
             self.status.current_step = "Finalizing brief"
             self.status.progress = 90
-            
+
             brief = ResearchBrief(
                 query=request.query,
                 date=datetime.now(timezone.utc),
@@ -154,8 +116,8 @@ class ResearchEngine:
                 metadata={
                     "parsed_query": parsed,
                     "subqueries": subqueries,
-                    "sources_fetched": len(sources),
-                    "clusters": list(clustered_sources.keys())
+                    "sources_fetched": research_brief.total_sources,
+                    "research_method": "deep_research_integration"
                 }
             )
             
@@ -170,7 +132,7 @@ class ResearchEngine:
                 brief_id=brief.brief_id,
                 findings_count=len(findings),
                 ideas_count=len(ideas),
-                sources_count=brief.total_sources
+                sources_count=research_brief.total_sources
             )
             
             return brief
@@ -184,6 +146,83 @@ class ResearchEngine:
                 errors=[str(e)]
             )
             raise
+
+    async def query_mcp_for_research_data(self, query: str, collection: str = None) -> List[Dict[str, Any]]:
+        """Query MCP for research-relevant data"""
+        try:
+            # Check MCP availability
+            mcp_health = await self.mcp_client.health_check()
+            if mcp_health.get("status") != "connected":
+                logger.warning("MCP not available for research data query")
+                return []
+
+            # Determine collection if not specified
+            if not collection:
+                # Try to infer collection from query
+                query_lower = query.lower()
+                if any(word in query_lower for word in ["lead", "customer", "crm"]):
+                    collection = "Lead"
+                elif any(word in query_lower for word in ["project", "task"]):
+                    collection = "ProjectManagement.project"
+                elif any(word in query_lower for word in ["staff", "employee", "hr"]):
+                    collection = "Staff.staff"
+                else:
+                    collection = "Lead"  # Default
+
+            # Perform search
+            search_results = []
+            async for result in self.mcp_client.find_documents(
+                collection=collection,
+                filter_query={"$text": {"$search": query}},
+                limit=20
+            ):
+                if result.get("type") == "tool.output.data":
+                    search_results.append(result.get("data", {}))
+
+            logger.info(f"MCP research query found {len(search_results)} results from {collection}")
+            return search_results
+
+        except Exception as e:
+            logger.error("Failed to query MCP for research data", error=str(e))
+            return []
+
+    async def enhance_research_with_mcp_data(self, research_brief: ResearchBrief, query: str) -> ResearchBrief:
+        """Enhance research brief with MCP data"""
+        try:
+            # Get relevant data from MCP
+            mcp_data = await self.query_mcp_for_research_data(query)
+
+            if not mcp_data:
+                return research_brief
+
+            # Create additional findings from MCP data
+            mcp_findings = []
+            for i, data_item in enumerate(mcp_data[:5]):  # Limit to 5 additional findings
+                finding = Finding(
+                    title=f"MCP Data Insight {i+1}",
+                    summary=f"Relevant data found in database: {str(data_item)[:200]}...",
+                    key_insights=[
+                        f"Database record contains: {list(data_item.keys())[:5]}",
+                        "This data may be relevant to your research query"
+                    ],
+                    sources=["Internal Database"],
+                    confidence=0.7
+                )
+                mcp_findings.append(finding)
+
+            # Add MCP findings to the research brief
+            research_brief.findings.extend(mcp_findings)
+
+            # Update metadata
+            research_brief.metadata["mcp_enhanced"] = True
+            research_brief.metadata["mcp_data_points"] = len(mcp_data)
+
+            logger.info(f"Enhanced research brief with {len(mcp_findings)} MCP findings")
+            return research_brief
+
+        except Exception as e:
+            logger.error("Failed to enhance research with MCP data", error=str(e))
+            return research_brief
     
     def _is_evidence_relevant(self, evidence: Evidence, finding: Finding) -> bool:
         """Check if evidence is relevant to a finding"""
@@ -197,52 +236,6 @@ class ResearchEngine:
         
         overlap = len(finding_words & evidence_words)
         return overlap > 5  # Arbitrary threshold
-    
-    async def save_to_crm(
-        self,
-        brief: ResearchBrief,
-        lead_id: Optional[str] = None,
-        business_id: Optional[str] = None,
-        create_tasks: bool = False,
-        user_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Save research brief to CRM via MCP"""
-
-        logger.info("Saving to CRM via MCP", brief_id=brief.brief_id, lead_id=lead_id)
-
-        brief_dict = brief.model_dump()
-        result = await self.mcp_client.save_research_brief(
-            brief=brief_dict,
-            crm_collection=settings.mongodb_crm_collection or "crm_notes",
-            lead_id=lead_id,
-            business_id=business_id,
-            create_tasks=create_tasks,
-            user_id=user_id
-        )
-
-        return result
-    
-    async def save_to_pms(
-        self,
-        brief: ResearchBrief,
-        project_id: str,
-        create_work_items: bool = False,
-        user_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Save research brief to PMS via MCP"""
-
-        logger.info("Saving to PMS via MCP", brief_id=brief.brief_id, project_id=project_id)
-
-        brief_dict = brief.model_dump()
-        result = await self.mcp_client.save_research_brief(
-            brief=brief_dict,
-            pms_collection=settings.mongodb_pms_collection or "pms_pages",
-            project_id=project_id,
-            create_work_items=create_work_items,
-            user_id=user_id
-        )
-
-        return result
     
     async def ideas_to_plan(
         self,

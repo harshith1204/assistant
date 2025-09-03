@@ -69,6 +69,7 @@ python-engineio
 python-jose[cryptography]
 passlib
 bcrypt
+langgraph
 
 # MongoDB MCP Integration
 mcp

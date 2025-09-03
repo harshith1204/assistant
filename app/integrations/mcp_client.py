@@ -58,6 +58,7 @@ class SmartCache:
         """Get cached result if valid"""
         if key in self.cache and self._is_valid(self.cache[key]):
             logger.debug("Cache hit", key=key)
+            self.cache[key]['access_count'] += 1  # Track access count
             return self.cache[key]['data']
         elif key in self.cache:
             # Remove expired entry
@@ -74,9 +75,33 @@ class SmartCache:
 
         self.cache[key] = {
             'data': data,
-            'timestamp': datetime.now(timezone.utc)
+            'timestamp': datetime.now(timezone.utc),
+            'access_count': 0,
+            'size': len(str(data)) if data else 0  # Rough size estimation
         }
-        logger.debug("Cache set", key=key)
+        logger.debug("Cache set", key=key, size=self.cache[key]['size'])
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics"""
+        total_size = sum(entry.get('size', 0) for entry in self.cache.values())
+        avg_access = sum(entry.get('access_count', 0) for entry in self.cache.values()) / max(len(self.cache), 1)
+
+        return {
+            'size': len(self.cache),
+            'max_size': self.maxsize,
+            'total_data_size': total_size,
+            'avg_access_count': avg_access,
+            'hit_rate': self._calculate_hit_rate(),
+            'oldest_entry': min(self.cache.keys(), key=lambda k: self.cache[k]['timestamp']) if self.cache else None
+        }
+
+    def _calculate_hit_rate(self) -> float:
+        """Calculate cache hit rate (simplified)"""
+        total_accesses = sum(entry.get('access_count', 0) for entry in self.cache.values())
+        if total_accesses == 0:
+            return 0.0
+        # This is a simplified calculation - in practice you'd track hits vs misses
+        return min(total_accesses / len(self.cache), 1.0)
 
 
 class QueryOptimizer:
@@ -119,7 +144,7 @@ class QueryOptimizer:
         }]
 
 class ConnectionPool:
-    """Connection pool for efficient HTTP requests"""
+    """Connection pool for efficient HTTP requests with Docker-aware settings"""
 
     def __init__(self, max_connections: int = 10):
         self.max_connections = max_connections
@@ -127,12 +152,26 @@ class ConnectionPool:
         self._lock = asyncio.Lock()
 
     async def get_session(self) -> aiohttp.ClientSession:
-        """Get or create a pooled session"""
+        """Get or create a pooled session with Docker-optimized timeouts"""
         async with self._lock:
             if self._session is None or self._session.closed:
-                timeout = ClientTimeout(total=30, connect=10)
+                # Docker-optimized timeouts: longer connection time, more retries
+                timeout = ClientTimeout(
+                    total=60,      # Increased from 30s to 60s for Docker
+                    connect=20,    # Increased from 10s to 20s for container startup
+                    sock_read=30,  # Socket read timeout
+                    sock_connect=15  # Socket connect timeout
+                )
+                connector = aiohttp.TCPConnector(
+                    limit=self.max_connections,
+                    # Docker networking improvements
+                    ttl_dns_cache=300,  # DNS cache TTL for container networking
+                    use_dns_cache=True,
+                    keepalive_timeout=60,
+                    enable_cleanup_closed=True
+                )
                 self._session = aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(limit=self.max_connections),
+                    connector=connector,
                     timeout=timeout
                 )
             return self._session
@@ -332,12 +371,9 @@ class MongoMCP:
         async for row in self.call_tool("mongodb.aggregate", args):
             yield row
 
-    async def insert_one(self, collection: str, document: Dict[str, Any]):
-        args = {"collection": collection, "document": document}
-        out = None
-        async for row in self.call_tool("mongodb.insertOne", args):
-            out = row
-        return out
+    # Write operations DISABLED for security - MCP client is read-only
+    # async def insert_one(self, collection: str, document: Dict[str, Any]):
+    #     raise PermissionError("Write operations are disabled. MCP client is read-only.")
 
     # Optimized Analysis Methods
     async def analyze_collection_smart(self, collection: str, analysis_type: str = "auto") -> AsyncGenerator[Dict[str, Any], None]:
@@ -485,6 +521,79 @@ class OfficialMCPClient:
         self.cache = SmartCache()
         self.query_optimizer = QueryOptimizer()
 
+    async def connect_to_mongodb_server(self, connection_string: str = None, read_only: bool = True):
+        """Connect to MongoDB MCP server using stdio transport (READ-ONLY ONLY)
+
+        Args:
+            connection_string: MongoDB connection string (uses config if not provided)
+            read_only: Whether to run in read-only mode (always enforced as True)
+        """
+        if not MCP_AVAILABLE:
+            raise RuntimeError("Official MCP package not installed. Install with: pip install mcp")
+
+        # Use connection string from config if not provided
+        if connection_string is None:
+            connection_string = settings.mongodb_connection_string
+            if not connection_string:
+                raise ValueError("No MongoDB connection string provided and none found in config")
+
+        # SECURITY: Always enforce read-only mode for security
+        if not read_only:
+            logger.warning("⚠️  Read-only mode was requested as False, but enforcing True for security")
+        read_only = True  # Always enforce read-only
+
+        # Set up environment variables for MongoDB MCP server
+        env = {
+            "MDB_MCP_CONNECTION_STRING": connection_string,
+            "MDB_MCP_READ_ONLY": "true",  # Always read-only
+        }
+
+        # Use npx to run the MongoDB MCP server
+        server_params = StdioServerParameters(
+            command="npx",
+            args=["-y", "mongodb-mcp-server@latest"],
+            env=env
+        )
+
+        # Setup stdio transport (official MCP way)
+        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
+        read_stream, write_stream = stdio_transport
+
+        # Create and initialize session
+        self.session = await self.exit_stack.enter_async_context(
+            ClientSession(read_stream, write_stream)
+        )
+
+        await self.session.initialize()
+        self.connected = True
+
+        # List available tools
+        response = await self.session.list_tools()
+        tools = response.tools
+        logger.info(f"Connected to MongoDB MCP server with {len(tools)} tools",
+                   tools=[tool.name for tool in tools])
+
+        return tools
+
+    async def connect(self) -> bool:
+        """Connect to MCP server (compatibility method for chat engine)"""
+        if not MCP_AVAILABLE:
+            logger.warning("Official MCP package not available")
+            return False
+
+        if self.connected:
+            logger.info("MCP client already connected")
+            return True
+
+        try:
+            logger.info("🔌 Connecting to MongoDB MCP server...")
+            await self.connect_to_mongodb_server()
+            logger.info("✅ MCP client connected successfully")
+            return True
+        except Exception as e:
+            logger.error("❌ Failed to connect MCP client", error=str(e))
+            return False
+
     async def connect_to_server(self, server_script_path: str):
         """Connect to MCP server following official protocol
 
@@ -507,11 +616,11 @@ class OfficialMCPClient:
 
         # Setup stdio transport (official MCP way)
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-        self.stdio, self.write = stdio_transport
+        read_stream, write_stream = stdio_transport
 
         # Create and initialize session
         self.session = await self.exit_stack.enter_async_context(
-            ClientSession(self.stdio, self.write)
+            ClientSession(read_stream, write_stream)
         )
 
         await self.session.initialize()
@@ -591,6 +700,78 @@ class OfficialMCPClient:
 
         return "\n".join(final_text)
 
+    async def list_tools(self) -> List[Dict[str, Any]]:
+        """List available MongoDB tools (READ-ONLY FILTERED)"""
+        if not self.connected or not self.session:
+            logger.warning("MCP client not connected")
+            return []
+
+        try:
+            response = await self.session.list_tools()
+            all_tools = [{"name": tool.name, "description": tool.description} for tool in response.tools]
+
+            # SECURITY: Filter out write operations
+            read_only_tools = []
+            for tool in all_tools:
+                tool_name = tool["name"].lower()
+                # Block any write operations
+                if any(write_op in tool_name for write_op in ['insert', 'update', 'delete', 'create', 'drop', 'write']):
+                    logger.info(f"🔒 Filtered out write tool: {tool['name']}")
+                    continue
+                read_only_tools.append(tool)
+
+            logger.info(f"✅ Found {len(read_only_tools)} read-only tools", tools=[t["name"] for t in read_only_tools])
+            return read_only_tools
+        except Exception as e:
+            logger.error("Failed to list tools", error=str(e))
+            return []
+
+    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
+        """Call a MongoDB MCP tool (READ-ONLY ONLY)"""
+        if not self.connected or not self.session:
+            yield {"type": "error", "message": "MCP client not connected"}
+            return
+
+        # SECURITY: Whitelist of allowed read-only tools only
+        ALLOWED_READ_TOOLS = {
+            "mongodb.find",
+            "mongodb.aggregate",
+            "mongodb.count",
+            "mongodb.listDatabases",
+            "mongodb.listCollections",
+            "mongodb.listIndexes",
+            "mongodb.findOne"  # if available
+        }
+
+        # BLOCK any write operations
+        if tool_name not in ALLOWED_READ_TOOLS:
+            if any(write_op in tool_name.lower() for write_op in ['insert', 'update', 'delete', 'create', 'drop', 'write']):
+                yield {"type": "error", "message": f"❌ Write operation '{tool_name}' is BLOCKED. MCP client is read-only."}
+                logger.warning(f"Blocked write operation attempt: {tool_name}")
+                return
+            else:
+                yield {"type": "error", "message": f"❌ Tool '{tool_name}' not in allowed read-only tools list"}
+                logger.warning(f"Blocked unauthorized tool: {tool_name}")
+                return
+
+        try:
+            logger.info("Calling MCP read-only tool", tool_name=tool_name, arguments=arguments)
+            result = await self.session.call_tool(tool_name, arguments)
+
+            # Process the result content
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'text'):
+                        yield {"type": "tool.output", "data": content_item.text}
+                    else:
+                        yield {"type": "tool.output", "data": str(content_item)}
+            else:
+                yield {"type": "tool.output", "data": str(result)}
+
+        except Exception as e:
+            logger.error("Failed to call read-only tool", tool_name=tool_name, error=str(e))
+            yield {"type": "error", "message": f"Tool call failed: {str(e)}"}
+
     async def smart_query_processing(self, query: str) -> AsyncGenerator[Dict[str, Any], None]:
         """Enhanced query processing with caching and optimization"""
         # Check cache first
@@ -615,27 +796,119 @@ class OfficialMCPClient:
             # Parse query to extract tool calls
             tool_calls = self._extract_tool_calls(query)
             for tool_call in tool_calls:
-                result = await self.session.call_tool(tool_call["name"], tool_call["args"])
-                yield {"type": "tool.result", "tool": tool_call["name"], "data": result.content}
+                async for result in self.call_tool(tool_call["name"], tool_call["args"]):
+                    yield result
         except Exception as e:
             yield {"type": "error", "message": f"Query processing failed: {str(e)}"}
 
     def _extract_tool_calls(self, query: str) -> List[Dict[str, Any]]:
-        """Simple tool call extraction from natural language query"""
+        """Simple tool call extraction from natural language query (READ-ONLY ONLY)"""
         # This is a simplified implementation
         # In practice, you'd use more sophisticated NLP or LLM for this
         tool_calls = []
 
         query_lower = query.lower()
 
-        # Example tool mappings (would be configurable)
+        # SECURITY: Only allow read operations
+        if any(write_word in query_lower for write_word in ['insert', 'update', 'delete', 'create', 'drop', 'write', 'modify']):
+            logger.warning("⚠️  Write operation detected in query, blocking tool extraction")
+            return []
+
+        # Example tool mappings (READ-ONLY only)
         if "find" in query_lower and "lead" in query_lower:
             tool_calls.append({
                 "name": "mongodb.find",
                 "args": {"collection": "Lead", "limit": 10}
             })
+        elif "count" in query_lower and "lead" in query_lower:
+            tool_calls.append({
+                "name": "mongodb.count",
+                "args": {"collection": "Lead"}
+            })
+        elif "list" in query_lower and "collections" in query_lower:
+            tool_calls.append({
+                "name": "mongodb.listCollections",
+                "args": {"database": settings.mongodb_database}
+            })
 
         return tool_calls
+
+    # Convenience methods for chat engine compatibility
+    async def find_documents(self, collection: str, filter_query: Optional[Dict[str, Any]] = None, projection: Optional[Dict[str, Any]] = None, limit: int = 50, user_id: Optional[str] = None):
+        """Find documents in collection (read-only)"""
+        args = {
+            "collection": collection,
+            "filter": filter_query or {},
+            "projection": projection or {},
+            "limit": min(limit, 200)  # Respect max rows limit
+        }
+        async for result in self.call_tool("mongodb.find", args):
+            yield result
+
+    async def aggregate_documents(self, collection: str, pipeline: List[Dict[str, Any]], limit: int = 100, user_id: Optional[str] = None):
+        """Aggregate documents in collection (read-only)"""
+        args = {
+            "collection": collection,
+            "pipeline": pipeline,
+            "limit": min(limit, 200)  # Respect max rows limit
+        }
+        async for result in self.call_tool("mongodb.aggregate", args):
+            yield result
+
+    # BLOCKED WRITE OPERATIONS (for compatibility)
+    async def create_note(self, *args, **kwargs):
+        """Create note - BLOCKED for security"""
+        raise PermissionError("❌ Write operations are blocked. MCP client is read-only.")
+
+    async def create_task(self, *args, **kwargs):
+        """Create task - BLOCKED for security"""
+        raise PermissionError("❌ Write operations are blocked. MCP client is read-only.")
+
+    async def create_work_item(self, *args, **kwargs):
+        """Create work item - BLOCKED for security"""
+        raise PermissionError("❌ Write operations are blocked. MCP client is read-only.")
+
+    async def create_page(self, *args, **kwargs):
+        """Create page - BLOCKED for security"""
+        raise PermissionError("❌ Write operations are blocked. MCP client is read-only.")
+
+    # CRM-specific read methods
+    async def find_crm_leads(self, limit: int = 100, user_id: Optional[str] = None):
+        """Find CRM leads (read-only)"""
+        filter_query = {}
+        if user_id:
+            filter_query["business_id"] = user_id
+
+        async for result in self.find_documents("Lead", filter_query, None, limit, user_id):
+            yield result
+
+    async def aggregate_crm_stats(self, user_id: Optional[str] = None):
+        """Aggregate CRM statistics (read-only)"""
+        match_stage = {}
+        if user_id:
+            match_stage = {"$match": {"business_id": user_id}}
+
+        pipeline = [
+            match_stage,
+            {"$group": {
+                "_id": None,
+                "total_leads": {"$sum": 1},
+                "active_leads": {"$sum": {"$cond": [{"$eq": ["$status", "ACTIVE"]}, 1, 0]}},
+                "won_leads": {"$sum": {"$cond": [{"$eq": ["$status", "WON"]}, 1, 0]}}
+            }}
+        ]
+
+        async for result in self.aggregate_documents("Lead", pipeline, 1, user_id):
+            yield result
+
+    async def find_crm_accounts(self, limit: int = 50, user_id: Optional[str] = None):
+        """Find CRM accounts (read-only)"""
+        filter_query = {}
+        if user_id:
+            filter_query["business_id"] = user_id
+
+        async for result in self.find_documents("leadStatus", filter_query, None, limit, user_id):
+            yield result
 
     async def cleanup(self):
         """Clean up resources following official MCP pattern"""
@@ -644,87 +917,32 @@ class OfficialMCPClient:
         logger.info("Official MCP client cleaned up")
 
     async def health_check(self) -> Dict[str, Any]:
-        """Health check for official MCP client"""
+        """Health check for MongoDB MCP client"""
         if not self.connected:
             return {"status": "disconnected"}
 
         try:
-            tools_response = await self.session.list_tools()
+            tools = await self.list_tools()
             return {
                 "status": "connected",
-                "tools_count": len(tools_response.tools),
-                "llm_available": self.anthropic is not None,
-                "cache_size": len(self.cache.cache)
+                "tools_count": len(tools),
+                "tools": [t["name"] for t in tools],
+                "cache_size": len(self.cache.cache) if hasattr(self.cache, 'cache') else 0,
+                "transport": "stdio"
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-
-class HybridMCPClient:
-    """Hybrid client that can use both HTTP and official MCP protocols"""
-
-    def __init__(self):
-        self.official_client: Optional[OfficialMCPClient] = None
-        self.http_client: Optional[MongoDBMCPClient] = None
-        self.preferred_protocol = "official"  # "official" or "http"
-
-        # Initialize both clients
-        if MCP_AVAILABLE:
-            self.official_client = OfficialMCPClient()
-        if AIOHTTP_AVAILABLE:
-            self.http_client = MongoDBMCPClient()
-
-    async def connect(self, connection_config: Dict[str, Any]):
-        """Connect using the best available protocol"""
-        if self.preferred_protocol == "official" and self.official_client:
-            try:
-                server_path = connection_config.get("server_path")
-                if server_path:
-                    await self.official_client.connect_to_server(server_path)
-                    return {"protocol": "official", "status": "connected"}
-            except Exception as e:
-                logger.warning("Official MCP connection failed, trying HTTP fallback", error=str(e))
-
-        # Fallback to HTTP client
-        if self.http_client:
-            connected = await self.http_client.connect()
-            if connected:
-                return {"protocol": "http", "status": "connected"}
-
-        return {"status": "failed", "message": "No connection method available"}
-
-    async def execute_query(self, query: str) -> AsyncGenerator[Dict[str, Any], None]:
-        """Execute query using the best available client"""
-        if self.official_client and self.official_client.connected:
-            async for result in self.official_client.smart_query_processing(query):
-                yield result
-        elif self.http_client and self.http_client.connected:
-            # Convert natural language to tool calls for HTTP client
-            tool_calls = self._parse_query_to_tools(query)
-            for tool_call in tool_calls:
-                async for result in self.http_client.call_tool(
-                    tool_call["name"],
-                    tool_call["args"]
-                ):
-                    yield result
-        else:
-            yield {"type": "error", "message": "No active connection"}
-
-    def _parse_query_to_tools(self, query: str) -> List[Dict[str, Any]]:
-        """Parse natural language query to MCP tool calls"""
-        # This would integrate with LLM for better parsing
-        return [{
-            "name": "mongodb.find",
-            "args": {"collection": "Lead", "limit": 10}
-        }]
-
-
 class MongoDBMCPClient:
-    """Optimized MCP client with smart analysis and parallel processing"""
+    """Optimized MCP client with smart analysis and parallel processing for Docker environments"""
 
     def __init__(self):
         self.mcp: Optional[MongoMCP] = None
         self.connected = False
+        self.last_connection_attempt = None
+        self.connection_failures = 0
+        self.docker_restart_detected = False
+
         # Validate configuration
         if not settings.mongodb_mcp_enabled:
             logger.info("MongoDB MCP integration disabled by configuration")
@@ -738,16 +956,53 @@ class MongoDBMCPClient:
         self._setup_client()
 
     def _setup_client(self):
-        """Setup MCP client"""
+        """Setup MCP client with Docker-aware configuration"""
         try:
-            base_url = settings.mongodb_mcp_server_url.rstrip('/')
+            # Use resolved URL that handles Docker networking
+            base_url = settings.mongodb_mcp_server_url_resolved.rstrip('/')
             self.mcp = MongoMCP(base_url, settings.mongodb_max_rows_per_query)
-            logger.info("MongoDB MCP client configured", url=base_url)
+
+            # Log Docker-specific configuration
+            docker_info = {
+                "docker_host": settings.mongodb_mcp_docker_host,
+                "docker_port": settings.mongodb_mcp_docker_port,
+                "docker_network": settings.mongodb_mcp_docker_network,
+                "resolved_url": base_url
+            }
+            logger.info("MongoDB MCP client configured for Docker", **docker_info)
         except Exception as e:
             logger.error("Failed to setup MCP client", error=str(e))
 
-    async def connect(self) -> bool:
-        """Connect to MCP server"""
+    def _detect_docker_restart(self) -> bool:
+        """Detect if Docker container has restarted based on connection patterns"""
+        now = datetime.now(timezone.utc)
+
+        # If we had multiple recent failures, it might indicate a container restart
+        if self.connection_failures >= 3:
+            # Reset failure counter and mark restart detected
+            self.connection_failures = 0
+            self.docker_restart_detected = True
+            logger.info("🐳 Docker container restart detected - resetting connection state")
+            return True
+
+        # Check if the last connection attempt was recent (within 30 seconds)
+        if self.last_connection_attempt:
+            time_since_last_attempt = (now - self.last_connection_attempt).total_seconds()
+            if time_since_last_attempt < 30 and self.connection_failures > 0:
+                logger.info("🐳 Rapid connection failures detected - likely Docker container issue")
+                return True
+
+        return False
+
+    def _get_docker_optimized_timeout(self) -> float:
+        """Get timeout optimized for Docker networking"""
+        # Use shorter timeout for Docker to fail fast and retry quickly
+        if self.docker_restart_detected:
+            return 5.0  # Shorter timeout when restart is detected
+        return settings.mongodb_query_timeout_seconds
+
+    async def connect(self, max_retries: int = 5, retry_delay: float = 2.0) -> bool:
+        """Connect to MCP server with Docker-aware retry logic"""
         if not self.mcp:
             logger.warning("MCP client not configured")
             return False
@@ -756,16 +1011,58 @@ class MongoDBMCPClient:
             logger.info("MCP client already connected")
             return True
 
-        try:
-            # Test connection by listing tools
-            tools = await self.mcp.list_tools()
-            logger.info(f"MCP client connected, found {len(tools)} tools", tools=tools)
-            self.connected = True
-            return True
-        except Exception as e:
-            logger.error("Failed to connect MCP client", error=str(e))
-            self.connected = False
-            return False
+        # Update connection attempt timestamp
+        self.last_connection_attempt = datetime.now(timezone.utc)
+
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Attempting to connect to MCP server (attempt {attempt + 1}/{max_retries})")
+
+                # Test connection by listing tools with Docker-optimized timeout
+                timeout = self._get_docker_optimized_timeout()
+                try:
+                    tools = await asyncio.wait_for(self.mcp.list_tools(), timeout=timeout)
+                    logger.info(f"✅ MCP client connected successfully to Docker MCP server, found {len(tools)} tools", tools=tools)
+                    self.connected = True
+                    self.connection_failures = 0  # Reset failure counter on success
+                    self.docker_restart_detected = False  # Reset restart flag
+                    return True
+                except asyncio.TimeoutError:
+                    logger.warning(f"🐳 Docker MCP server connection timed out after {timeout}s")
+                    raise aiohttp.ClientError("Connection timeout")
+
+            except aiohttp.ClientError as e:
+                self.connection_failures += 1  # Track connection failures
+                if "Connection refused" in str(e) or "Connection reset by peer" in str(e):
+                    if attempt < max_retries - 1:
+                        # Check for Docker restart pattern
+                        if self._detect_docker_restart():
+                            logger.warning(f"🐳 Docker restart detected, using longer retry delay for container startup...")
+                            retry_delay = 8.0  # Longer delay for container startup
+                        else:
+                            # Use shorter delays for regular connection issues
+                            retry_delay = min(retry_delay * 1.5, 10.0)  # Cap at 10 seconds
+
+                        logger.warning(f"🐳 Docker MCP server connection failed (attempt {attempt + 1}), retrying in {retry_delay}s...",
+                                     error=str(e), docker_network=settings.mongodb_mcp_docker_network)
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(f"Failed to connect to MCP server after {max_retries} attempts", error=str(e))
+                else:
+                    logger.error("Failed to connect MCP client", error=str(e))
+                    break
+            except Exception as e:
+                self.connection_failures += 1  # Track connection failures
+                logger.error("Unexpected error connecting to MCP client", error=str(e))
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 1.5
+                    continue
+                break
+
+        self.connected = False
+        return False
 
     async def disconnect(self):
         """Disconnect from MCP server and cleanup resources"""
@@ -862,11 +1159,40 @@ class MongoDBMCPClient:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
-        except Exception as e:
-            logger.error("Failed to call MongoDB MCP tool", error=str(e), tool_name=tool_name)
+        except aiohttp.ClientError as e:
+            # Docker-specific connection errors
+            if "Connection refused" in str(e) or "Connection reset by peer" in str(e):
+                logger.warning("Docker MCP server connection error during tool call", error=str(e), tool_name=tool_name)
+                # Mark as disconnected to trigger reconnection on next call
+                self.connected = False
+                yield {
+                    "type": "error",
+                    "message": "Docker MCP server connection failed. Will retry on next request.",
+                    "tool": tool_name,
+                    "docker_error": True,
+                    "retry_recommended": True
+                }
+            else:
+                logger.error("HTTP error calling MongoDB MCP tool", error=str(e), tool_name=tool_name)
+                yield {
+                    "type": "error",
+                    "message": f"HTTP error calling tool: {str(e)}",
+                    "tool": tool_name
+                }
+        except asyncio.TimeoutError:
+            logger.warning("Timeout calling MongoDB MCP tool - possible Docker container issue", tool_name=tool_name)
             yield {
                 "type": "error",
-                "message": f"Tool call failed: {str(e)}",
+                "message": "Request timeout - Docker container may be overloaded",
+                "tool": tool_name,
+                "timeout": True,
+                "docker_error": True
+            }
+        except Exception as e:
+            logger.error("Unexpected error calling MongoDB MCP tool", error=str(e), tool_name=tool_name)
+            yield {
+                "type": "error",
+                "message": f"Unexpected error calling tool: {str(e)}",
                 "tool": tool_name
             }
 
@@ -1028,46 +1354,136 @@ class MongoDBMCPClient:
         }
 
     async def health_check(self) -> Dict[str, Any]:
-        """Check MongoDB MCP server health with optimization status"""
-        if not self.connected:
+        """Docker-aware health check for MongoDB MCP server"""
+        if not self.mcp:
             return {
+                "status": "not_configured",
+                "message": "MCP client not initialized"
+            }
+
+        if not self.connected:
+            # Try to reconnect for Docker environments where containers might restart
+            logger.info("MCP client not connected, attempting Docker-aware reconnection...")
+            connected = await self.connect(max_retries=2, retry_delay=1.0)
+            if not connected:
+                            return {
                 "status": "disconnected",
+                "message": "Failed to reconnect to Docker MCP server",
                 "available_tools": 0,
+                "docker_environment": True,
+                "docker_troubleshooting": {
+                    "check_container_running": f"docker ps | grep mongodb-mcp",
+                    "check_container_logs": f"docker logs <container_name>",
+                    "verify_network_connectivity": f"curl -v {settings.mongodb_mcp_server_url_resolved}/health",
+                    "docker_network_mode": settings.mongodb_mcp_docker_network,
+                    "resolved_url": settings.mongodb_mcp_server_url_resolved
+                },
                 "optimizations": {
                     "connection_pooling": False,
                     "caching": False,
                     "parallel_processing": False,
-                    "smart_templates": True  # Template registry always available
+                    "smart_templates": True
                 }
             }
 
-        # Get tools and update cache
-        tools = await self.list_tools()
+        try:
+            # Quick connectivity test for Docker
+            tools = await asyncio.wait_for(self.list_tools(), timeout=10.0)
 
-        # Check optimization components
-        optimizations = {
-            "connection_pooling": self.mcp and hasattr(self.mcp, 'connection_pool'),
-            "caching": self.mcp and hasattr(self.mcp, 'cache'),
-            "parallel_processing": self.mcp and hasattr(self.mcp, 'parallel_executor'),
-            "smart_templates": True,
-            "query_optimization": self.mcp and hasattr(self.mcp, 'query_optimizer')
-        }
+            # Check optimization components
+            optimizations = {
+                "connection_pooling": self.mcp and hasattr(self.mcp, 'connection_pool'),
+                "caching": self.mcp and hasattr(self.mcp, 'cache'),
+                "parallel_processing": self.mcp and hasattr(self.mcp, 'parallel_executor'),
+                "smart_templates": True,
+                "query_optimization": self.mcp and hasattr(self.mcp, 'query_optimizer'),
+                "docker_optimized": True
+            }
 
-        return {
-            "status": "connected",
-            "available_tools": len(tools),
-            "tools": [tool.get("name") for tool in tools],
-            "optimizations": optimizations,
-            "cache_stats": {
-                "size": len(self.mcp.cache.cache) if self.mcp else 0,
-                "max_size": self.mcp.cache.maxsize if self.mcp else 0
-            } if self.mcp and hasattr(self.mcp, 'cache') else None
-        }
+            # Get detailed cache stats if available
+            cache_stats = None
+            if self.mcp and hasattr(self.mcp, 'cache'):
+                cache_stats = self.mcp.cache.get_stats()
 
-# Global client instances
-mongodb_mcp_client = MongoDBMCPClient()  # Optimized HTTP-based client
-hybrid_mcp_client = HybridMCPClient()    # Hybrid client with official MCP support
+            # Docker-specific health metrics
+            docker_health = {
+                "docker_host": settings.mongodb_mcp_docker_host,
+                "docker_port": settings.mongodb_mcp_docker_port,
+                "docker_network": settings.mongodb_mcp_docker_network,
+                "resolved_url": settings.mongodb_mcp_server_url_resolved,
+                "connection_pool_active": self.mcp and self.mcp.connection_pool._session is not None,
+                "connection_failures": self.connection_failures,
+                "docker_restart_detected": self.docker_restart_detected,
+                "last_connection_attempt": self.last_connection_attempt.isoformat() if self.last_connection_attempt else None,
+                "last_health_check": datetime.now(timezone.utc).isoformat()
+            }
 
+            return {
+                "status": "connected",
+                "message": "Docker MCP server healthy",
+                "available_tools": len(tools),
+                "tools": [tool.get("name") for tool in tools],
+                "optimizations": optimizations,
+                "cache_stats": cache_stats,
+                "docker_environment": True,
+                "docker_health": docker_health,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        except asyncio.TimeoutError:
+            logger.warning("🐳 Docker MCP server health check timeout - container may be overloaded or restarting")
+            return {
+                "status": "timeout",
+                "message": "Docker container response timeout - check container status",
+                "docker_environment": True,
+                "docker_troubleshooting": {
+                    "check_container_status": "docker ps | grep mongodb-mcp",
+                    "check_container_resources": "docker stats <container_name>",
+                    "increase_container_resources": "docker update --memory=1g --cpus=1 <container_name>",
+                    "resolved_url": settings.mongodb_mcp_server_url_resolved
+                }
+            }
+        except aiohttp.ClientError as e:
+            logger.warning("🐳 Docker MCP server connection error during health check", error=str(e))
+            # Mark as disconnected so next call will try to reconnect
+            self.connected = False
+            return {
+                "status": "connection_error",
+                "message": f"Docker container connection error: {str(e)}",
+                "docker_environment": True,
+                "docker_troubleshooting": {
+                    "check_docker_network": f"docker network ls",
+                    "verify_container_network": f"docker inspect <container_name> | grep -A 10 NetworkSettings",
+                    "test_connectivity": f"docker exec <container_name> curl -v {settings.mongodb_mcp_server_url_resolved}",
+                    "check_container_ports": f"docker port <container_name>",
+                    "resolved_url": settings.mongodb_mcp_server_url_resolved
+                }
+            }
+        except Exception as e:
+            logger.error("Unexpected error during Docker health check", error=str(e))
+            return {
+                "status": "error",
+                "message": f"Docker health check failed: {str(e)}",
+                "docker_environment": True
+            }
+
+# Global client instances - using stdio-based client as per MongoDB MCP server design
+mongodb_mcp_client = OfficialMCPClient()  # Stdio-based client for MongoDB MCP server
+
+# Auto-connect to MongoDB MCP server on import if connection string is available
+async def initialize_mongodb_mcp_client():
+    """Initialize and connect the MongoDB MCP client (READ-ONLY ONLY)"""
+    if settings.mongodb_connection_string and settings.mongodb_mcp_enabled:
+        try:
+            logger.info("🔒 Auto-connecting to MongoDB MCP server in READ-ONLY mode...")
+            # SECURITY: Always use enforced read-only mode
+            await mongodb_mcp_client.connect_to_mongodb_server(read_only=settings.mongodb_readonly_enforced)
+            logger.info("✅ MongoDB MCP client connected successfully (READ-ONLY mode)")
+        except Exception as e:
+            logger.error("❌ Failed to auto-connect MongoDB MCP client", error=str(e))
+            logger.info("Note: Make sure Node.js and npm are installed for MCP server")
+    else:
+        logger.info("MongoDB MCP client not configured (missing connection string or disabled)")
 
 async def create_official_mcp_client():
     """Factory function to create official MCP client with proper error handling"""

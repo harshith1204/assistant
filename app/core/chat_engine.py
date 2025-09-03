@@ -12,7 +12,7 @@ import structlog
 from app.config import settings
 from app.chat_models import (
     ChatMessage, ChatRequest, ChatResponse, Conversation,
-    MessageRole, MessageType, ConversationContext
+    MessageRole, MessageType
 )
 from app.models import ResearchRequest, ResearchBrief
 from app.core.memory_manager import MemoryManager
@@ -44,7 +44,14 @@ class ChatEngine:
         self._cancel_signals: Dict[str, asyncio.Event] = {}
 
         # Initialize MCP client connection (will be done asynchronously when needed)
-        # asyncio.create_task(self._init_mcp_client())  # Commented out to avoid event loop issues
+        try:
+            # Only create task if we have a running event loop
+            loop = asyncio.get_running_loop()
+            asyncio.create_task(self._init_mcp_client())
+        except RuntimeError:
+            # No running event loop, skip async initialization
+            logger.info("No running event loop, MCP client will be initialized on first use")
+            self._mcp_initialized = False
         print("✅ ChatEngine initialized successfully")
 
         # Action handlers mapping (for conversational routing)
@@ -66,33 +73,52 @@ class ChatEngine:
                 # Test the connection by listing tools
                 tools = await self.mcp_client.list_tools()
                 logger.info(f"MCP client found {len(tools)} tools", tools=[tool.get('name') for tool in tools])
-                # Run smoke test for MongoDB connectivity
-                await self._smoke_test_mongo()
+                
+                # Set MCP status
+                self._mcp_status = "connected"
             else:
                 logger.warning("❌ Failed to connect MCP client")
+                self._mcp_status = "disconnected"
         except Exception as e:
             logger.error("Failed to initialize MCP client", error=str(e))
+            self._mcp_status = "error"
 
-    async def _smoke_test_mongo(self):
-        """Smoke test MongoDB MCP connectivity"""
+    async def _ensure_mcp_initialized(self):
+        """Ensure MCP client is initialized"""
+        if getattr(self, '_mcp_initialized', True):
+            return  # Already initialized or skipped
+
         try:
-            logger.info("Running MCP smoke test...")
-            row_count = 0
-            async for r in self.mcp_client.find_documents("Lead", {"_id": {"$exists": True}}, {"_id": 1}, 1, user_id="smoke"):
-                if r.get("type") == "tool.output.data":
-                    logger.info("MCP smoke test OK", sample=r.get("data"))
-                    row_count += 1
-                    break
-                elif r.get("type") == "error":
-                    logger.error("MCP smoke test error", error=r)
-                    break
-                else:
-                    logger.debug("MCP smoke test received non-data event", event=r)
-
-            if row_count == 0:
-                logger.warning("MCP smoke test returned no rows (check collection names and server connectivity)")
+            await self._init_mcp_client()
+            self._mcp_initialized = True
         except Exception as e:
-            logger.error("MCP smoke test failed", error=str(e))
+            logger.error("Failed to initialize MCP client on demand", error=str(e))
+            self._mcp_initialized = True  # Don't try again
+
+    async def check_mcp_health(self) -> Dict[str, Any]:
+        """Check MCP client health status"""
+        # Ensure MCP is initialized first
+        await self._ensure_mcp_initialized()
+
+        try:
+            if hasattr(self.mcp_client, 'health_check'):
+                health = await self.mcp_client.health_check()
+            else:
+                # Fallback health check
+                health = {
+                    "status": self._mcp_status if hasattr(self, '_mcp_status') else "unknown",
+                    "connected": getattr(self.mcp_client, 'connected', False),
+                    "tools_count": 0
+                }
+
+            return health
+        except Exception as e:
+            logger.error("MCP health check failed", error=str(e))
+            return {
+                "status": "error",
+                "error": str(e),
+                "connected": False
+            }
 
     async def process_message(
         self,
@@ -134,6 +160,10 @@ class ChatEngine:
                 request,
                 user_id
             )
+
+            # Add MCP status to context for better decision making
+            mcp_status = await self.check_mcp_health()
+            context["mcp_status"] = mcp_status
             
             # Determine if research is needed
             needs_research = await self._needs_research(request.message, context)
@@ -301,6 +331,16 @@ class ChatEngine:
 
             # MongoDB-first strategy
             if routing_strategy == "mongodb-first" and not cancel_signal.is_set():
+                # Check MCP health before proceeding
+                mcp_health = await self.check_mcp_health()
+                if mcp_health.get("status") != "connected":
+                    yield {
+                        "type": "mongodb.warning",
+                        "conversation_id": conversation.conversation_id,
+                        "message": "MCP client is not connected. Attempting to use alternative methods.",
+                        "health": mcp_health
+                    }
+
                 yield {"type": "mongodb.started", "conversation_id": conversation.conversation_id}
                 try:
                     # Call the MongoDB handler directly for streaming
@@ -324,21 +364,53 @@ class ChatEngine:
                     }
                 except Exception as e:
                     logger.error("MongoDB stage failed", error=str(e))
-                    yield {"type": "error", "stage": "mongodb", "message": str(e)}
+                    yield {
+                        "type": "error",
+                        "stage": "mongodb",
+                        "message": str(e),
+                        "fallback_available": True,
+                        "suggestion": "Try rephrasing your database query or check MCP connectivity"
+                    }
 
             # Research-first strategy
             if routing_strategy == "research-first" and not cancel_signal.is_set():
                 yield {"type": "research.started", "conversation_id": conversation.conversation_id}
                 try:
-                    research_request = ResearchRequest(query=request.message, max_sources=15, deep_dive=True)
-                    # Stream research progress
-                    async for chunk in self._stream_research(research_request):
+                    # Use the same research service as non-streaming flow for consistency
+                    research_context = await self._prepare_research_context(
+                        conversation, request.message, user_id, context
+                    )
+                    inferred_params = research_context.get("inferred_parameters", {})
+
+                    conversation_context = {
+                        "entities": research_context.get("research_entities", {}),
+                        "topics": research_context.get("conversation_metadata", {}).get("topics", []),
+                        "preferences": {
+                            "industry": inferred_params.get("industry"),
+                            "geography": inferred_params.get("geography")
+                        },
+                        "research_history": research_context.get("research_history", [])
+                    }
+
+                    # Stream research progress updates
+                    async for chunk in self._stream_research_progress():
                         yield {
                             "type": "research.chunk",
                             "conversation_id": conversation.conversation_id,
                             "data": chunk
                         }
-                    brief = await self.research_engine.run_research(research_request)
+
+                    # Execute research using unified service (same as non-streaming)
+                    brief = await self.research_service.research(
+                        query=request.message,
+                        scope=inferred_params.get("scope", []),
+                        industry=inferred_params.get("industry"),
+                        geography=inferred_params.get("geography"),
+                        max_sources=inferred_params.get("max_sources", 15),
+                        user_id=user_id,
+                        conversation_context=conversation_context
+                    )
+
                     research_notes = await self._format_research_conversationally(brief)
                     yield {
                         "type": "research.done",
@@ -351,11 +423,27 @@ class ChatEngine:
                     context["research_notes"] = research_notes
                 except Exception as e:
                     logger.error("Research stage failed", error=str(e))
-                    yield {"type": "error", "stage": "research", "message": str(e)}
+                    # Provide user-friendly error message with fallback options
+                    error_message = await self._create_research_error_response(str(e), request.message)
+                    yield {
+                        "type": "error",
+                        "stage": "research",
+                        "message": error_message,
+                        "can_retry": True,
+                        "suggestions": [
+                            "Try rephrasing your question",
+                            "Ask about a specific aspect",
+                            "Try again in a moment"
+                        ]
+                    }
 
             if cancel_signal.is_set():
                 yield {"type": "chat.final", "conversation_id": conversation.conversation_id, "message": {"content": "Cancelled.", "role": MessageRole.ASSISTANT.value}}
                 return
+
+            # Add MCP status to context for better decision making
+            mcp_status = await self.check_mcp_health()
+            context["mcp_status"] = mcp_status
 
             # Generate response with enhanced context
             messages = await self._prepare_llm_messages(conversation, request.message, context)
@@ -828,7 +916,9 @@ class ChatEngine:
 
         except Exception as e:
             logger.error("Unified action failed", error=str(e), intent=intent)
-            yield {"type": "error", "content": f"Action failed: {str(e)}", "intent": intent}
+            # Provide more helpful error messages
+            error_msg = self._format_mcp_error(e, intent)
+            yield {"type": "error", "content": error_msg, "intent": intent, "stage": "action"}
 
     async def _handle_mongodb_action(
         self,
@@ -978,9 +1068,12 @@ class ChatEngine:
                     yield result
 
             else:
+                mcp_health = await self.check_mcp_health()
                 yield {
                     "type": "mongodb_info",
-                    "content": f"I can help you query the database. I detected intent: {intent}. Available operations: find, aggregate, vector search, run command. What would you like to do?"
+                    "content": f"I can help you query the database. I detected intent: {intent}. Available operations: find, aggregate, vector search, run command. What would you like to do?",
+                    "mcp_status": mcp_health,
+                    "available_collections": settings.mongodb_allowed_collections_list
                 }
 
             # Add sources used information
@@ -1175,40 +1268,13 @@ class ChatEngine:
         user_id: Optional[str],
         base_context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Prepare specialized context for research operations"""
+        """Prepare specialized context for research operations with optimizations"""
         research_context = base_context.copy()
 
-        # Extract research-relevant information from user profile
+        # Extract research-relevant information from user profile with caching
         if base_context.get("profile"):
             profile_facts = base_context["profile"]
-
-            # Look for business/research preferences
-            research_preferences = {
-                "industries": [],
-                "geographies": [],
-                "research_topics": [],
-                "business_focus": []
-            }
-
-            for fact in profile_facts:
-                fact_text = str(fact).lower()
-
-                # Extract industry preferences
-                if any(word in fact_text for word in ["industry", "sector", "business"]):
-                    research_preferences["industries"].append(str(fact))
-
-                # Extract geography preferences
-                if any(word in fact_text for word in ["location", "country", "region", "market"]):
-                    research_preferences["geographies"].append(str(fact))
-
-                # Extract research topics
-                if any(word in fact_text for word in ["research", "study", "analysis", "investigation"]):
-                    research_preferences["research_topics"].append(str(fact))
-
-                # Extract business focus
-                if any(word in fact_text for word in ["startup", "enterprise", "consulting", "strategy"]):
-                    research_preferences["business_focus"].append(str(fact))
-
+            research_preferences = await self._extract_research_preferences(profile_facts)
             research_context["research_preferences"] = research_preferences
 
         # Extract conversation topics and entities relevant to research
@@ -1220,34 +1286,27 @@ class ChatEngine:
             "key_topics": conversation_metadata.get("topics", [])
         }
 
-        # Analyze recent messages for research patterns
-        recent_messages = base_context.get("recent_messages", [])
-        for msg in recent_messages[-10:]:  # Last 10 messages
-            content = msg.get("content", "").lower()
+        # Analyze recent messages for research patterns (optimized)
+        await self._analyze_recent_messages_for_research(base_context, research_context)
 
-            # Look for company mentions
-            company_indicators = ["company", "corporation", "startup", "business", "organization"]
-            if any(indicator in content for indicator in company_indicators):
-                research_context["research_entities"]["mentioned_companies"].append(msg["content"])
-
-            # Look for industry mentions
-            industry_keywords = ["industry", "sector", "market", "technology", "finance", "healthcare"]
-            if any(keyword in content for keyword in industry_keywords):
-                research_context["research_entities"]["mentioned_industries"].append(msg["content"])
-
-            # Look for previous research queries
-            research_keywords = ["research", "find", "analyze", "investigate", "study"]
-            if any(keyword in content for keyword in research_keywords):
-                research_context["research_entities"]["research_queries"].append(msg["content"])
-
-        # Add research history from memory
+        # Add research history from memory (with caching to avoid repeated searches)
         if user_id:
-            research_history = await self.memory_manager.search_memory(
-                query="research OR analysis OR investigation OR study",
-                user_id=user_id,
-                limit=10,
-                search_scope="user"
-            )
+            # Use conversation ID as cache key to avoid repeated searches
+            cache_key = f"research_history_{user_id}_{conversation.conversation_id}"
+            if not hasattr(self, '_research_history_cache'):
+                self._research_history_cache = {}
+
+            if cache_key not in self._research_history_cache:
+                research_history = await self.memory_manager.search_memory(
+                    query="research OR analysis OR investigation OR study",
+                    user_id=user_id,
+                    limit=10,
+                    search_scope="user"
+                )
+                self._research_history_cache[cache_key] = research_history
+            else:
+                research_history = self._research_history_cache[cache_key]
+
             research_context["research_history"] = research_history
 
         # Determine research scope and parameters based on message analysis
@@ -1255,8 +1314,67 @@ class ChatEngine:
 
         return research_context
 
+    async def _extract_research_preferences(self, profile_facts: List) -> Dict[str, List[str]]:
+        """Extract research preferences from profile facts with optimizations"""
+        research_preferences = {
+            "industries": [],
+            "geographies": [],
+            "research_topics": [],
+            "business_focus": []
+        }
+
+        # Define patterns for efficient matching
+        patterns = {
+            "industries": ["industry", "sector", "business"],
+            "geographies": ["location", "country", "region", "market"],
+            "research_topics": ["research", "study", "analysis", "investigation"],
+            "business_focus": ["startup", "enterprise", "consulting", "strategy"]
+        }
+
+        for fact in profile_facts:
+            fact_text = str(fact).lower()
+
+            # Check each pattern category efficiently
+            for category, keywords in patterns.items():
+                if any(word in fact_text for word in keywords):
+                    research_preferences[category].append(str(fact))
+                    break  # Avoid duplicate categorization
+
+        return research_preferences
+
+    async def _analyze_recent_messages_for_research(
+        self,
+        base_context: Dict[str, Any],
+        research_context: Dict[str, Any]
+    ) -> None:
+        """Analyze recent messages for research patterns with optimized pattern matching"""
+        recent_messages = base_context.get("recent_messages", [])
+        entities = research_context["research_entities"]
+
+        # Define patterns for efficient matching
+        patterns = {
+            "company_indicators": ["company", "corporation", "startup", "business", "organization"],
+            "industry_keywords": ["industry", "sector", "market", "technology", "finance", "healthcare"],
+            "research_keywords": ["research", "find", "analyze", "investigate", "study"]
+        }
+
+        for msg in recent_messages[-10:]:  # Last 10 messages
+            content = msg.get("content", "").lower()
+
+            # Check company mentions
+            if any(indicator in content for indicator in patterns["company_indicators"]):
+                entities["mentioned_companies"].append(msg["content"])
+
+            # Check industry mentions
+            if any(keyword in content for keyword in patterns["industry_keywords"]):
+                entities["mentioned_industries"].append(msg["content"])
+
+            # Check research queries
+            if any(keyword in content for keyword in patterns["research_keywords"]):
+                entities["research_queries"].append(msg["content"])
+
     def _infer_research_parameters(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Infer research parameters from message and context"""
+        """Infer research parameters from message and context with optimized pattern matching"""
         message_lower = message.lower()
         params = {
             "max_sources": 15,
@@ -1265,56 +1383,70 @@ class ChatEngine:
             "geography": None
         }
 
-        # Determine research depth based on source count
-        if any(word in message_lower for word in ["comprehensive", "detailed", "thorough", "extensive", "in-depth"]):
+        # Determine research depth based on source count (optimized)
+        depth_indicators = {
+            "comprehensive": ["comprehensive", "detailed", "thorough", "extensive", "in-depth"],
+            "brief": ["quick", "brief", "overview", "summary", "basic"]
+        }
+
+        if any(word in message_lower for word in depth_indicators["comprehensive"]):
             params["max_sources"] = 25
-        elif any(word in message_lower for word in ["quick", "brief", "overview", "summary"]):
+        elif any(word in message_lower for word in depth_indicators["brief"]):
             params["max_sources"] = 8
 
-        # Infer industry from message or context
-        industries = ["technology", "finance", "healthcare", "retail", "manufacturing",
-                     "energy", "education", "real estate", "automotive", "food"]
+        # Infer industry from message or context (optimized with sets for faster lookup)
+        industries = {
+            "technology", "finance", "healthcare", "retail", "manufacturing",
+            "energy", "education", "real estate", "automotive", "food",
+            "pharmaceutical", "biotech", "ai", "artificial intelligence", "machine learning"
+        }
 
-        for industry in industries:
-            if industry in message_lower:
-                params["industry"] = industry
-                break
+        # Check message first (most specific)
+        message_words = set(message_lower.split())
+        industry_match = message_words & industries
+        if industry_match:
+            params["industry"] = list(industry_match)[0]
 
         # Use industry from research preferences if not found in message
         if not params["industry"] and context.get("research_preferences", {}).get("industries"):
-            # Extract industry from preferences (simplified)
             pref_text = " ".join(context["research_preferences"]["industries"]).lower()
-            for industry in industries:
-                if industry in pref_text:
-                    params["industry"] = industry
-                    break
+            pref_words = set(pref_text.split())
+            pref_industry_match = pref_words & industries
+            if pref_industry_match:
+                params["industry"] = list(pref_industry_match)[0]
 
-        # Infer geography
-        geographies = ["united states", "europe", "asia", "china", "india", "germany",
-                      "japan", "uk", "canada", "australia"]
+        # Infer geography (optimized)
+        geographies = {
+            "united states", "us", "usa", "america", "europe", "asia", "china",
+            "india", "germany", "japan", "uk", "canada", "australia", "singapore"
+        }
 
-        for geo in geographies:
-            if geo in message_lower:
-                params["geography"] = geo
-                break
+        geo_match = message_words & geographies
+        if geo_match:
+            params["geography"] = list(geo_match)[0]
 
-        # Determine research scope
+        # Determine research scope (optimized with sets)
         scope_keywords = {
-            "market": ["market", "demand", "competition", "pricing"],
-            "competitors": ["competitor", "competition", "rival", "versus"],
-            "technology": ["technology", "tech", "innovation", "software"],
-            "customer": ["customer", "user", "consumer", "audience"],
-            "pricing": ["pricing", "cost", "revenue", "profit"],
-            "regulatory": ["regulation", "legal", "compliance", "policy"]
+            "market": {"market", "demand", "competition", "pricing", "marketplace"},
+            "competitors": {"competitor", "competition", "rival", "versus", "benchmarking"},
+            "technology": {"technology", "tech", "innovation", "software", "platform"},
+            "customer": {"customer", "user", "consumer", "audience", "segment"},
+            "pricing": {"pricing", "cost", "revenue", "profit", "monetization"},
+            "regulatory": {"regulation", "legal", "compliance", "policy", "governance"}
         }
 
         for scope_name, keywords in scope_keywords.items():
-            if any(keyword in message_lower for keyword in keywords):
+            if message_words & keywords:
                 params["scope"].append(scope_name)
 
         # Default scope if none detected
         if not params["scope"]:
             params["scope"] = ["market"]
+
+        # Add business intelligence based on message complexity
+        message_length = len(message.split())
+        if message_length > 20:  # Complex query
+            params["max_sources"] = min(params["max_sources"] + 5, 30)
 
         return params
 
@@ -2130,28 +2262,47 @@ Provide 3 short, specific questions that would naturally continue the conversati
         context: Dict[str, Any]
     ) -> str:
         """Determine routing strategy based on intent and context"""
-        # MongoDB database intents
+        # MongoDB database intents - highest priority
         if intent.startswith("db."):
             return "mongodb-first"
 
-        # CRM and PMS actions
+        # CRM and PMS actions - route to MCP
         if intent in ["crm_action", "pms_action"]:
             return "mongodb-first"
 
-        # Check for database/data keywords in the message
+        # Check for MCP status in context
+        mcp_status = context.get("mcp_status", {}).get("status", "unknown") if context else "unknown"
+
+        # Enhanced database/data keyword detection with MCP awareness
         message_lower = request.message.lower()
         database_keywords = [
-            "database", "data", "collection", "records", "documents",
-            "find", "search", "query", "lookup", "retrieve", "fetch",
-            "show me", "tell me", "what's in", "list", "display",
-            "get", "check", "see", "view", "access", "connect to"
+            "database", "data", "collection", "records", "documents", "mongo", "mongodb",
+            "find", "search", "query", "lookup", "retrieve", "fetch", "aggregate",
+            "show me", "tell me", "what's in", "list", "display", "count",
+            "get", "check", "see", "view", "access", "connect to", "crm", "pms",
+            "lead", "project", "task", "staff", "employee", "hr", "work item"
         ]
 
-        if any(keyword in message_lower for keyword in database_keywords):
+        # Collection-specific keywords
+        collection_keywords = [
+            "lead", "leads", "customer", "clients", "contact", "contacts",
+            "project", "projects", "task", "tasks", "work item", "work items",
+            "staff", "employee", "employees", "hr", "hrms", "personnel"
+        ]
+
+        has_database_keywords = any(keyword in message_lower for keyword in database_keywords)
+        has_collection_keywords = any(keyword in message_lower for keyword in collection_keywords)
+
+        # Route to MCP if database keywords are present and MCP is available
+        if (has_database_keywords or has_collection_keywords) and mcp_status == "connected":
             # If it looks like a database query but wasn't detected as such,
             # route it to MCP with a general db.query intent
             if not intent.startswith("db."):
                 return "mongodb-first"
+            return "mongodb-first"
+
+        # If MCP is not connected but database keywords are present, still try MCP (will show warning)
+        elif has_database_keywords or has_collection_keywords:
             return "mongodb-first"
 
         # Explicit research request
@@ -2175,14 +2326,79 @@ Provide 3 short, specific questions that would naturally continue the conversati
         # Default to direct answer
         return "direct-answer"
     
-    async def _stream_research(self, research_request: ResearchRequest) -> AsyncGenerator[Dict[str, Any], None]:
-        """Stream research progress updates"""
-        # This is a placeholder - actual implementation would stream from research_engine
-        yield {"status": "searching", "sources_found": 0}
+    async def _stream_research_progress(self) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream research progress updates with realistic timing"""
+        # Initializing phase
+        yield {"status": "initializing", "message": "Preparing research parameters...", "progress": 0}
+        await asyncio.sleep(0.2)
+
+        # Search phase
+        yield {"status": "searching", "message": "Searching for relevant sources...", "progress": 10}
         await asyncio.sleep(0.5)
-        yield {"status": "analyzing", "sources_found": 5}
-        await asyncio.sleep(0.5)
-        yield {"status": "synthesizing", "sources_found": 10}
+
+        # Gathering sources phase
+        yield {"status": "gathering", "message": "Gathering and analyzing sources...", "progress": 30}
+        await asyncio.sleep(0.8)
+
+        # Processing phase
+        yield {"status": "processing", "message": "Processing and extracting information...", "progress": 50}
+        await asyncio.sleep(0.6)
+
+        # Analyzing phase
+        yield {"status": "analyzing", "message": "Analyzing findings and patterns...", "progress": 70}
+        await asyncio.sleep(0.7)
+
+        # Synthesizing phase
+        yield {"status": "synthesizing", "message": "Synthesizing research results...", "progress": 90}
+        await asyncio.sleep(0.4)
+
+    async def _create_research_error_response(self, error: str, original_query: str) -> str:
+        """Create user-friendly error response for research failures"""
+        error_lower = error.lower()
+
+        # Network-related errors
+        if any(keyword in error_lower for keyword in ["timeout", "connection", "network", "unreachable"]):
+            return f"I encountered a network issue while researching '{original_query[:50]}...'. This sometimes happens with external services. You can try again in a moment, or I can help you find information from my existing knowledge."
+
+        # Rate limiting errors
+        elif any(keyword in error_lower for keyword in ["rate limit", "quota", "429"]):
+            return f"The research service is currently busy (rate limit reached) for '{original_query[:50]}...'. Please wait 1-2 minutes and try again, or ask me about a different topic in the meantime."
+
+        # Service unavailable errors
+        elif any(keyword in error_lower for keyword in ["service", "unavailable", "503", "502"]):
+            return f"The research service is temporarily unavailable for '{original_query[:50]}...'. This is usually resolved quickly. In the meantime, I can answer based on my general knowledge or help with other questions."
+
+        # Content filtering or policy errors
+        elif any(keyword in error_lower for keyword in ["content", "filter", "policy", "blocked"]):
+            return f"I wasn't able to research '{original_query[:50]}...' due to content filtering policies. Try rephrasing your question or asking about a different topic."
+
+    def _format_mcp_error(self, error: Exception, intent: str) -> str:
+        """Format MCP-related errors with helpful suggestions"""
+        error_str = str(error).lower()
+
+        # Connection-related errors
+        if any(keyword in error_str for keyword in ["connection", "timeout", "unreachable", "network"]):
+            return f"Database connection issue for '{intent}' operation. The MCP server may be unavailable. Please try again in a moment or contact support if the issue persists."
+
+        # Authentication errors
+        elif any(keyword in error_str for keyword in ["auth", "permission", "unauthorized", "forbidden"]):
+            return f"Access denied for '{intent}' operation. You may not have permission to access this data."
+
+        # Collection not found
+        elif any(keyword in error_str for keyword in ["collection", "not found", "ns not found"]):
+            return f"Collection not found for '{intent}' operation. Available collections: {', '.join(settings.mongodb_allowed_collections_list[:5])}..."
+
+        # Query errors
+        elif any(keyword in error_str for keyword in ["query", "syntax", "parse", "invalid"]):
+            return f"Query syntax error for '{intent}' operation. Please check your query format and try again."
+
+        # Rate limiting
+        elif any(keyword in error_str for keyword in ["rate limit", "too many", "quota"]):
+            return f"Rate limit exceeded for '{intent}' operation. Please wait a moment before trying again."
+
+        # Generic MCP error
+        else:
+            return f"Database operation failed for '{intent}': {str(error)}. Please try rephrasing your request or contact support if the issue continues."
     
     async def _extract_high_signal_facts(
         self,

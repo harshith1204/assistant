@@ -90,10 +90,23 @@ class Settings(BaseSettings):
     # MongoDB MCP Configuration
     mongodb_mcp_enabled: bool = Field(True, env="MONGODB_MCP_ENABLED")
     mongodb_mcp_server_url: str = Field("http://localhost:8001", env="MONGODB_MCP_SERVER_URL")  # MongoDB MCP Server endpoint
+
+    # MCP Server Configuration (stdio-based, not Docker)
+    mongodb_mcp_stdio_mode: bool = Field(True, env="MONGODB_MCP_STDIO_MODE")  # Use stdio mode (true) vs HTTP mode (false)
+
+    # MongoDB Atlas/MongoDB connection (for MCP server)
     mongodb_connection_string: str = Field("", env="MONGODB_CONNECTION_STRING")
     mongodb_database: str = Field("crm", env="MONGODB_DATABASE")
+    mongodb_readonly: bool = Field(True, env="MONGODB_READONLY")  # Always read-only for security
     mongodb_readonly_user: str = Field("", env="MONGODB_READONLY_USER")
     mongodb_readonly_password: str = Field("", env="MONGODB_READONLY_PASSWORD")
+
+    # MCP Server Configuration (for Docker MCP server setup)
+    mongodb_mcp_api_client_id: str = Field("", env="MONGODB_MCP_API_CLIENT_ID")  # Atlas API Client ID
+    mongodb_mcp_api_client_secret: str = Field("", env="MONGODB_MCP_API_CLIENT_SECRET")  # Atlas API Client Secret
+    mongodb_mcp_read_only: bool = Field(True, env="MONGODB_MCP_READ_ONLY")  # MCP server read-only mode
+    mongodb_mcp_index_check: bool = Field(False, env="MONGODB_MCP_INDEX_CHECK")  # Enable index checking
+    mongodb_mcp_log_path: str = Field("./logs/mongodb-mcp.log", env="MONGODB_MCP_LOG_PATH")  # MCP server logs
 
     # MongoDB MCP Security & Limits
     mongodb_allowed_collections: List[str] = [
@@ -126,6 +139,8 @@ class Settings(BaseSettings):
                 # Fall back to comma-separated parsing
                 return [col.strip() for col in self.mongodb_allowed_collections.split(",")]
         return []
+
+
     mongodb_max_rows_per_query: int = Field(200, env="MONGODB_MAX_ROWS_PER_QUERY")
     mongodb_query_timeout_seconds: int = Field(30, env="MONGODB_QUERY_TIMEOUT_SECONDS")
     mongodb_tenant_field: str = Field("business_id", env="MONGODB_TENANT_FIELD")
@@ -163,6 +178,12 @@ class Settings(BaseSettings):
     @property
     def groq_model(self) -> str:
         return self.llm_model
+
+    # SECURITY: Always enforce read-only mode for MCP client
+    @property
+    def mongodb_readonly_enforced(self) -> bool:
+        """Always return True for read-only mode (security enforcement)"""
+        return True
     
     class Config:
         env_file = ".env"

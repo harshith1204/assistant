@@ -51,6 +51,14 @@ chat_engine = ChatEngine()
 async def lifespan(app: FastAPI):
     """Lifecycle manager for the application"""
     logger.info("Starting Conversational Chat Engine", version=settings.app_version)
+
+    # Initialize MCP client
+    try:
+        from app.integrations.mcp_client import initialize_mongodb_mcp_client
+        await initialize_mongodb_mcp_client()
+    except Exception as e:
+        logger.warning("Failed to initialize MCP client", error=str(e))
+
     yield
     logger.info("Shutting down Conversational Chat Engine")
 
@@ -87,11 +95,71 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    # Get MCP health status
+    mcp_health = await chat_engine.check_mcp_health()
+
     return {
         "status": "healthy",
         "version": settings.app_version,
-        "debug": settings.debug
+        "debug": settings.debug,
+        "mcp_status": mcp_health,
+        "features": {
+            "chat": True,
+            "research": True,
+            "memory": True,
+            "database": mcp_health.get("status") == "connected"
+        }
     }
+
+
+@app.get("/mcp/status")
+async def mcp_status():
+    """Get MCP client status"""
+    try:
+        health = await chat_engine.check_mcp_health()
+        return {
+            "status": health.get("status", "unknown"),
+            "connected": health.get("status") == "connected",
+            "tools_count": health.get("tools_count", 0) if health.get("tools_count") else 0,
+            "available_collections": settings.mongodb_allowed_collections_list,
+            "last_checked": health.get("timestamp", None),
+            "cache_stats": health.get("cache_stats", {}),
+            "optimizations": health.get("optimizations", {}),
+            "details": health
+        }
+    except Exception as e:
+        logger.error("Failed to get MCP status", error=str(e))
+        return {
+            "status": "error",
+            "error": str(e),
+            "connected": False
+        }
+
+
+@app.post("/mcp/reconnect")
+async def reconnect_mcp():
+    """Manually trigger MCP reconnection"""
+    try:
+        logger.info("Manually triggering MCP reconnection...")
+        # Reinitialize MCP client
+        await chat_engine._init_mcp_client()
+
+        # Check new status
+        health = await chat_engine.check_mcp_health()
+
+        return {
+            "success": True,
+            "message": "MCP reconnection attempted",
+            "status": health.get("status", "unknown"),
+            "connected": health.get("status") == "connected"
+        }
+    except Exception as e:
+        logger.error("Failed to reconnect MCP", error=str(e))
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to reconnect MCP client"
+        }
 
 
 # WebSocket endpoint for conversational chat

@@ -184,7 +184,8 @@ class ConversationalIntentDetector:
     ) -> Dict[str, Any]:
         """Deep intent analysis using LLM"""
         
-        system_prompt = """You are a conversational intent analyzer. Analyze the user's message and determine:
+        system_prompt = """You are a conversational intent analyzer with knowledge of MongoDB database operations. Analyze the user's message and determine:
+
 1. Primary intent (research, crm_action, pms_action, report_generation, meeting_scheduling, db.find, db.aggregate, db.vectorSearch, db.runCommand, db.query, general_chat)
 2. Specific action needed
 3. Entities mentioned (names, dates, topics, database collections, etc.)
@@ -192,7 +193,22 @@ class ConversationalIntentDetector:
 5. Confidence level (0-1)
 6. Whether clarification is needed
 
-Consider the conversation context if provided.
+DATABASE COLLECTIONS AVAILABLE:
+CRM: Lead, leadStatus, activity, task, notes, meeting, callLog, timeLine, fields, staffLogs, document, attachments, appointment, emailTemplate, templates, segmentation, leadScoreRule, fieldGroup
+Staff/HRMS: staff, loginCredentials, staffPermissions, staffWorkInformation
+Project Management: project, workItem, timeline, page, cycle, members, projectSetting
+Business: business, businessPreferences, websiteLeads, contactUs
+
+DATABASE INTENT GUIDELINES:
+- db.find: For finding/searching records, listing data, retrieving documents
+- db.aggregate: For statistics, grouping, summing, averaging, counting
+- db.vectorSearch: For semantic search, finding similar content
+- db.runCommand: For database administration, system info
+- db.query: General database queries
+
+If the message mentions collections or data, prioritize database intents.
+
+Consider the conversation context and MCP status if provided.
 
 Return ONLY valid JSON:
 {
