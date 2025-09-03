@@ -19,8 +19,12 @@ from app.core.memory_manager import MemoryManager
 from app.research.service import ResearchService
 from app.core.research_engine import ResearchEngine
 from app.core.intent import (
-    IntentDetector
+    IntentDetector,
+    classify_intent,
+    ConversationalIntent
 )
+from app.core.agent import Agent
+from app.core.synthesis import synthesize_final_answer
 from app.integrations.mcp_client import mongodb_mcp_client
 
 logger = structlog.get_logger()
@@ -30,7 +34,7 @@ class ChatEngine:
     """Main chat engine with research capabilities"""
     
     def __init__(self):
-        """Initialize chat engine"""
+        """Initialize chat engine with agent-first approach"""
         print(f"🔧 Initializing ChatEngine with model: {settings.llm_model}")
         self.groq_client = AsyncGroq(api_key=settings.groq_api_key)
         self.memory_manager = MemoryManager()
@@ -39,6 +43,15 @@ class ChatEngine:
         # Simple intent detection
         self.intent_detector = IntentDetector()
         self.mcp_client = mongodb_mcp_client
+        
+        # Initialize the agent for strict tool usage
+        self.agent = Agent(
+            llm=self.groq_client,
+            mcp_client=self.mcp_client,
+            research_engine=self.research_engine,
+            memory_manager=self.memory_manager
+        )
+        
         self.conversations: Dict[str, Conversation] = {}
         self._turn_counters: Dict[str, int] = {}
         self._cancel_signals: Dict[str, asyncio.Event] = {}
@@ -269,48 +282,61 @@ class ChatEngine:
                 })
             yield {"type": "memory.used", "conversation_id": conversation.conversation_id, "items": memory_used}
 
-            # ===== STAGE 2: UNDERSTAND INTENT =====
+            # ===== STAGE 2: USE AGENT FOR STRICT INTENT ROUTING =====
+            # Use the new deterministic intent classifier
+            intent = await classify_intent(self.groq_client, request.message)
+            
+            # Extract entities using legacy detector for compatibility
             intent_result = await self.intent_detector.detect_intent(request.message, context)
-
-            # Normalize intent payload from intent.py (handle both "label" and "intent" fields)
-            raw_intent = intent_result.get("label") or intent_result.get("intent") or "general"
-            intent = str(raw_intent).lower()
-
-            confidence = intent_result.get("confidence", 0.5)
             entities = intent_result.get("entities", {}) or {}
-
-            # Heuristic fallback: if user is clearly asking about DB-y stuff, force a db intent
-            msg_lower = (request.message or "").lower()
-            if intent == "general" and any(k in msg_lower for k in ["crm", "project", "task", "staff", "hrms", "mongo", "mongodb", "db", "collection"]):
-                intent = "db.find"
-
+            confidence = 0.8 if intent != ConversationalIntent.GENERAL else 0.6
+            
+            # Convert enum to string for compatibility
+            intent_str = intent.value
+            
             # Debug logging for intent detection
-            logger.info("Intent detection result", intent=intent, confidence=confidence, entities=entities)
+            logger.info("Agent intent detection", intent=intent_str, confidence=confidence, entities=entities)
 
-            # Low confidence - request clarification
-            if confidence < 0.5 and not request.skip_clarification:
-                yield {
-                    "type": "clarification_needed",
-                    "conversation_id": conversation.conversation_id,
-                    "question": intent_result.get("clarification_question", "Could you please clarify what you'd like me to help with?"),
-                    "confidence": confidence,
-                    "detected_intent": intent
-                }
-                return
+            # Low confidence - request clarification (only for GENERAL with info-seeking patterns)
+            if intent == ConversationalIntent.GENERAL and confidence < 0.5 and not request.skip_clarification:
+                from app.core.intent import seems_info_seeking
+                if seems_info_seeking(request.message):
+                    yield {
+                        "type": "clarification_needed",
+                        "conversation_id": conversation.conversation_id,
+                        "question": "Could you please clarify what specific information you're looking for?",
+                        "confidence": confidence,
+                        "detected_intent": intent_str
+                    }
+                    return
 
-            # ===== STAGE 3: PLAN (routing policy) =====
-            routing_strategy = self._determine_routing_strategy(
-                intent, confidence, entities, request, context
-            )
+            # ===== STAGE 3: STRICT ROUTING - NO FALLBACK TO LLM FOR DATA QUERIES =====
+            # Determine if we should use agent or legacy routing
+            use_agent = intent in [
+                ConversationalIntent.RESEARCH,
+                ConversationalIntent.NEWS,
+                ConversationalIntent.DB_LOOKUP,
+                ConversationalIntent.PRICING_RESEARCH,
+                ConversationalIntent.COMPETITOR_ANALYSIS
+            ]
+            
+            if use_agent:
+                # Use strict agent routing
+                routing_strategy = "agent-controlled"
+            else:
+                # Legacy routing for compatibility
+                routing_strategy = self._determine_routing_strategy(
+                    intent_str, confidence, entities, request, context
+                )
 
             # Debug logging for routing strategy
-            logger.info("Routing strategy determined", intent=intent, strategy=routing_strategy)
+            logger.info("Routing strategy determined", intent=intent_str, strategy=routing_strategy)
 
             # ===== STAGE 4: EXECUTE =====
             research_notes: Optional[str] = None
 
             # Handle profile update intent
-            if intent == "profile_update" and entities.get("profile_facts"):
+            if intent == ConversationalIntent.PROFILE_UPDATE and entities.get("profile_facts"):
                 for fact in entities.get("profile_facts", []):
                     await self.memory_manager.set_profile_fact(
                         user_id, fact["key"], fact["value"], fact.get("priority", 50)
@@ -328,6 +354,122 @@ class ChatEngine:
                     "message": {"content": "I've updated your profile with the information you provided.", "role": MessageRole.ASSISTANT.value}
                 }
                 return
+
+            # ===== AGENT-CONTROLLED EXECUTION (STRICT TOOL USAGE) =====
+            if routing_strategy == "agent-controlled" and not cancel_signal.is_set():
+                yield {"type": "agent.started", "conversation_id": conversation.conversation_id, "intent": intent_str}
+                
+                try:
+                    # Use the agent to handle the request with strict tool usage
+                    agent_result = await self.agent.handle_user_turn(
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        message=request.message,
+                        geo=request.geography if hasattr(request, 'geography') else None
+                    )
+                    
+                    # Stream the result
+                    content = agent_result.get("content", "")
+                    sources = agent_result.get("sources", [])
+                    status = agent_result.get("status", "success")
+                    
+                    # If agent failed due to no sources, show clear message
+                    if status in ["no_sources", "failed"]:
+                        yield {
+                            "type": "agent.no_sources",
+                            "conversation_id": conversation.conversation_id,
+                            "message": content,
+                            "intent": intent_str
+                        }
+                        # Still need to create final message
+                        assistant_message = ChatMessage(
+                            conversation_id=conversation.conversation_id,
+                            role=MessageRole.ASSISTANT,
+                            content=content,
+                            message_type=MessageType.ERROR
+                        )
+                        conversation.add_message(assistant_message)
+                        yield {
+                            "type": "chat.final",
+                            "conversation_id": conversation.conversation_id,
+                            "message": {"content": content, "role": MessageRole.ASSISTANT.value},
+                            "sources": sources,
+                            "intent": intent_str,
+                            "status": status
+                        }
+                        return
+                    
+                    # Stream the content
+                    for i in range(0, len(content), 50):  # Chunk for streaming effect
+                        chunk = content[i:i+50]
+                        yield {
+                            "type": "chat.token",
+                            "conversation_id": conversation.conversation_id,
+                            "delta": chunk
+                        }
+                        await asyncio.sleep(0.01)  # Small delay for streaming effect
+                    
+                    # Add sources information
+                    if sources:
+                        yield {
+                            "type": "sources.used",
+                            "conversation_id": conversation.conversation_id,
+                            "sources": sources,
+                            "count": len(sources)
+                        }
+                    
+                    # Create assistant message
+                    assistant_message = ChatMessage(
+                        conversation_id=conversation.conversation_id,
+                        role=MessageRole.ASSISTANT,
+                        content=content,
+                        message_type=MessageType.TEXT,
+                        metadata={"sources": sources, "intent": intent_str}
+                    )
+                    conversation.add_message(assistant_message)
+                    await self.memory_manager.update_from_message(assistant_message, user_id)
+                    
+                    # Generate suggestions
+                    suggestions = await self._generate_suggestions(conversation, content)
+                    
+                    yield {
+                        "type": "chat.final",
+                        "conversation_id": conversation.conversation_id,
+                        "message": {"content": content, "role": MessageRole.ASSISTANT.value},
+                        "sources": sources,
+                        "suggestions": suggestions,
+                        "intent": intent_str,
+                        "agent_controlled": True
+                    }
+                    
+                    return  # Exit early, agent has handled everything
+                    
+                except Exception as e:
+                    logger.error("Agent execution failed", error=str(e), intent=intent_str)
+                    error_msg = f"I encountered an error while processing your {intent_str} request. Please try again."
+                    yield {
+                        "type": "error",
+                        "stage": "agent",
+                        "message": error_msg,
+                        "original_error": str(e),
+                        "intent": intent_str
+                    }
+                    # Create error message
+                    assistant_message = ChatMessage(
+                        conversation_id=conversation.conversation_id,
+                        role=MessageRole.ASSISTANT,
+                        content=error_msg,
+                        message_type=MessageType.ERROR
+                    )
+                    conversation.add_message(assistant_message)
+                    yield {
+                        "type": "chat.final",
+                        "conversation_id": conversation.conversation_id,
+                        "message": {"content": error_msg, "role": MessageRole.ASSISTANT.value},
+                        "intent": intent_str,
+                        "status": "error"
+                    }
+                    return
 
             # MongoDB-first strategy
             if routing_strategy == "mongodb-first" and not cancel_signal.is_set():

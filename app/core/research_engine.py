@@ -20,7 +20,7 @@ logger = structlog.get_logger()
 
 
 class ResearchEngine:
-    """Main orchestrator for research operations"""
+    """Main orchestrator for research operations with strict source requirements"""
     
     def __init__(self):
         self.query_understanding = QueryUnderstanding()
@@ -356,3 +356,96 @@ class ResearchEngine:
     def get_status(self) -> ResearchStatus:
         """Get current research status"""
         return self.status
+    
+    async def run(
+        self,
+        query: str,
+        user_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        geography: Optional[str] = None,
+        use_mcp: bool = True,
+        max_sources: int = 15
+    ) -> Any:
+        """Simplified interface for agent - returns object with sources and formatted_answer"""
+        from types import SimpleNamespace
+        
+        try:
+            # Create research request
+            request = ResearchRequest(
+                query=query,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                geo=geography,
+                max_sources=max_sources
+            )
+            
+            # Run research through service (which does the actual web fetching)
+            research_brief = await self.research_service.research(
+                query=query,
+                geography=geography,
+                max_sources=max_sources,
+                user_id=user_id
+            )
+            
+            # Extract sources from findings
+            sources = []
+            for finding in research_brief.findings:
+                if hasattr(finding, 'sources'):
+                    for source_url in finding.sources:
+                        sources.append({
+                            "type": "web",
+                            "url": source_url,
+                            "title": finding.title,
+                            "snippet": finding.summary[:200]
+                        })
+            
+            # Add metadata source
+            sources.append({
+                "type": "research_brief",
+                "brief_id": research_brief.brief_id,
+                "findings_count": len(research_brief.findings),
+                "ideas_count": len(research_brief.ideas)
+            })
+            
+            # Format the answer
+            formatted_answer = await self._format_research_conversationally(research_brief)
+            
+            return SimpleNamespace(
+                sources=sources,
+                formatted_answer=formatted_answer,
+                brief=research_brief
+            )
+            
+        except Exception as e:
+            logger.error("Research run failed", error=str(e))
+            # Return empty result on failure
+            return SimpleNamespace(
+                sources=[],
+                formatted_answer="",
+                brief=None
+            )
+    
+    async def _format_research_conversationally(self, brief: ResearchBrief) -> str:
+        """Format research results in a conversational way"""
+        response = f"Based on my research on **{brief.query}**, here's what I found:\n\n"
+        
+        if brief.executive_summary:
+            response += f"{brief.executive_summary}\n\n"
+        
+        if brief.findings:
+            response += "**Key Findings:**\n"
+            for i, finding in enumerate(brief.findings[:4], 1):
+                response += f"{i}. **{finding.title}** - {finding.summary}\n"
+                if finding.key_insights:
+                    response += f"   • {finding.key_insights[0]}\n"
+                response += "\n"
+        
+        if brief.ideas:
+            response += "**Recommendations:**\n"
+            sorted_ideas = sorted(brief.ideas, key=lambda x: x.rice.score if x.rice.score else 0, reverse=True)
+            for i, idea in enumerate(sorted_ideas[:3], 1):
+                response += f"{i}. {idea.idea}\n"
+        
+        response += f"\n*Analyzed {brief.total_sources} sources*"
+        
+        return response
