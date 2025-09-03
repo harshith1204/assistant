@@ -1,339 +1,191 @@
-"""Synthesis and summarization of research findings"""
+"""Synthesis module to format final answers with source attribution and prevent fabrication"""
 
-import json
-from typing import List, Dict, Any, Optional
-from datetime import datetime
-from groq import AsyncGroq
+from typing import Dict, Any, List, Optional
 import structlog
-from tenacity import retry, stop_after_attempt, wait_exponential
-
-from app.config import settings
-from app.models import Finding, Evidence, ResearchScope, Idea, RICEScore, ResearchBrief
 
 logger = structlog.get_logger()
 
 
+def synthesize_final_answer(
+    draft: str | Dict[str, Any],
+    sources: List[Dict[str, Any]],
+    intent: str = "unknown"
+) -> Dict[str, Any]:
+    """
+    Synthesize final answer with proper source attribution.
+    Prevents fabrication by refusing to answer without sources when needed.
+    """
+    
+    # Intents that REQUIRE sources
+    source_required_intents = {
+        "research", "news", "pricing_research", "competitor_analysis",
+        "db_lookup", "db.find", "db.aggregate", "db.vectorSearch"
+    }
+    
+    # Check if sources are required but missing
+    if intent in source_required_intents and not sources:
+        logger.warning("No sources for source-required intent", intent=intent)
+        return {
+            "content": _get_no_source_message(intent),
+            "sources": [],
+            "intent": intent,
+            "status": "no_sources"
+        }
+    
+    # Normalize the draft content
+    if isinstance(draft, dict) and "content" in draft:
+        content = draft["content"]
+    else:
+        content = str(draft)
+    
+    # If no content generated
+    if not content or content.strip() == "":
+        return {
+            "content": "I couldn't generate a response. Please try rephrasing your question.",
+            "sources": [],
+            "intent": intent,
+            "status": "no_content"
+        }
+    
+    # Normalize and enrich sources
+    normalized_sources = []
+    for source in sources:
+        normalized = _normalize_source(source)
+        if normalized:
+            normalized_sources.append(normalized)
+    
+    # Add source citations to content if research/news
+    if intent in ["research", "news", "pricing_research", "competitor_analysis"] and normalized_sources:
+        content = _add_source_citations(content, normalized_sources)
+    
+    return {
+        "content": content,
+        "sources": normalized_sources,
+        "intent": intent,
+        "status": "success",
+        "metadata": {
+            "sources_count": len(normalized_sources),
+            "has_web_sources": any(s.get("type") == "web" for s in normalized_sources),
+            "has_db_sources": any(s.get("type") in ["mongodb", "database"] for s in normalized_sources)
+        }
+    }
+
+
+def _get_no_source_message(intent: str) -> str:
+    """Get appropriate message when sources are missing"""
+    messages = {
+        "research": "I need to research that topic to provide accurate information. Please ensure web search is enabled or try rephrasing your question.",
+        "news": "I need access to current news sources to answer that. Please try again with web search enabled.",
+        "pricing_research": "I need to look up current pricing information from reliable sources. Please try again.",
+        "competitor_analysis": "I need to research competitor information to provide an accurate analysis. Please try again.",
+        "db_lookup": "I couldn't access the database. Please ensure the MCP client is connected and try again.",
+        "db.find": "Database query failed. Please check the connection and try again.",
+        "db.aggregate": "Database aggregation failed. Please verify the query and try again.",
+        "db.vectorSearch": "Vector search failed. Please ensure vector search is enabled and try again."
+    }
+    
+    return messages.get(
+        intent,
+        "I need additional data sources to answer that accurately. Please try again or rephrase your question."
+    )
+
+
+def _normalize_source(source: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalize source information for consistent display"""
+    if not source:
+        return None
+    
+    normalized = {
+        "type": source.get("type", "unknown"),
+        "title": source.get("title", source.get("name", "Untitled")),
+        "url": source.get("url", source.get("link")),
+        "snippet": source.get("snippet", source.get("description", "")),
+        "metadata": {}
+    }
+    
+    # Handle database sources
+    if source.get("type") in ["mongodb", "database"] or source.get("collection"):
+        normalized["type"] = "mongodb"
+        normalized["collection"] = source.get("collection", "unknown")
+        normalized["database"] = source.get("database", "default")
+        normalized["count"] = source.get("count", 0)
+        normalized["metadata"]["query_type"] = source.get("operation", "find")
+    
+    # Handle web sources
+    elif source.get("type") == "web" or source.get("url"):
+        normalized["type"] = "web"
+        normalized["domain"] = _extract_domain(source.get("url", ""))
+        normalized["metadata"]["relevance_score"] = source.get("relevance_score", 0.5)
+    
+    # Handle research brief sources
+    elif source.get("type") == "research_brief":
+        normalized["type"] = "research"
+        normalized["brief_id"] = source.get("brief_id")
+        normalized["metadata"]["findings_count"] = source.get("findings_count", 0)
+    
+    # Skip invalid sources
+    if normalized["type"] == "unknown" and not normalized["title"]:
+        return None
+    
+    return normalized
+
+
+def _extract_domain(url: str) -> str:
+    """Extract domain from URL"""
+    if not url:
+        return ""
+    
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        return parsed.netloc or parsed.path.split('/')[0]
+    except:
+        return ""
+
+
+def _add_source_citations(content: str, sources: List[Dict[str, Any]]) -> str:
+    """Add source citations to content for research responses"""
+    if not sources:
+        return content
+    
+    # Don't add citations if they're already present
+    if "Sources:" in content or "References:" in content:
+        return content
+    
+    # Build citation section
+    citations = ["\n\n**Sources:**"]
+    
+    for i, source in enumerate(sources[:5], 1):  # Limit to 5 sources
+        if source["type"] == "web":
+            domain = source.get("domain", "Unknown")
+            title = source.get("title", "Web Source")
+            citations.append(f"{i}. [{title}]({source.get('url', '#')}) - {domain}")
+        
+        elif source["type"] == "mongodb":
+            collection = source.get("collection", "Unknown")
+            count = source.get("count", 0)
+            citations.append(f"{i}. Database: {collection} ({count} records)")
+        
+        elif source["type"] == "research":
+            brief_id = source.get("brief_id", "Unknown")[:8]
+            findings = source.get("metadata", {}).get("findings_count", 0)
+            citations.append(f"{i}. Research Brief {brief_id} ({findings} findings)")
+        
+        else:
+            title = source.get("title", "Source")
+            citations.append(f"{i}. {title}")
+    
+    if len(sources) > 5:
+        citations.append(f"... and {len(sources) - 5} more sources")
+    
+    return content + "\n".join(citations)
+
+
 class ResearchSynthesizer:
-    """Synthesize research findings and generate insights"""
+    """Synthesize research results with citations"""
     
     def __init__(self):
-        self.client = AsyncGroq(api_key=settings.groq_api_key)
-        self.model = settings.llm_model
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def synthesize_findings(
-        self,
-        sources: Dict[str, List[Dict[str, Any]]],
-        query: str,
-        key_questions: List[str]
-    ) -> List[Finding]:
-        """Synthesize findings from clustered sources"""
-        
-        findings = []
-        
-        for topic, topic_sources in sources.items():
-            if not topic_sources:
-                continue
-            
-            # Prepare context from sources
-            context = self._prepare_context(topic_sources, limit=5)
-            
-            # Generate finding for this topic
-            finding = await self._generate_finding(
-                topic=topic,
-                context=context,
-                query=query,
-                questions=key_questions
-            )
-            
-            if finding:
-                findings.append(finding)
-        
-        # Sort by confidence
-        findings.sort(key=lambda f: f.confidence, reverse=True)
-        
-        return findings
-    
-    def _prepare_context(self, sources: List[Dict[str, Any]], limit: int = 5) -> str:
-        """Prepare context from sources"""
-        context_parts = []
-        
-        for source in sources[:limit]:
-            if source.get('content'):
-                # Take first 1000 chars
-                content_snippet = source['content'][:1000]
-                context_parts.append(f"""
-Source: {source.get('title', 'Unknown')}
-URL: {source.get('url', '')}
-Date: {source.get('date', 'Unknown')}
-Content: {content_snippet}...
----""")
-        
-        return "\n".join(context_parts)
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def _generate_finding(
-        self,
-        topic: str,
-        context: str,
-        query: str,
-        questions: List[str]
-    ) -> Optional[Finding]:
-        """Generate a finding for a topic"""
-        
-        system_prompt = """You are a research analyst creating findings from sources.
-        
-        For the given topic and sources, create a finding that:
-        1. Has a clear, descriptive title
-        2. Provides a concise summary (2-3 sentences)
-        3. Lists 3-5 key insights
-        4. Assesses confidence level (0-1)
-        5. Notes recency of information
-        
-        IMPORTANT: Every claim must be supported by the provided sources.
-        
-        Return ONLY valid JSON (no additional text):
-        {
-            "title": "...",
-            "summary": "...",
-            "key_insights": ["insight1", "insight2", ...],
-            "confidence": 0.7,
-            "recency": "last-6-months"
-        }"""
-        
-        user_prompt = f"""
-Topic: {topic}
-Original Query: {query}
-Key Questions: {', '.join(questions[:3])}
-
-Sources:
-{context}
-
-Create a finding for this topic based on the sources."""
-        
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.3
-            )
-            
-            result = json.loads(response.choices[0].message.content)
-            
-            # Map topic to scope
-            scope_map = {
-                'market': ResearchScope.MARKET,
-                'competitors': ResearchScope.COMPETITORS,
-                'pricing': ResearchScope.PRICING,
-                'technology': ResearchScope.TECHNOLOGY,
-                'regulation': ResearchScope.COMPLIANCE,
-                'customers': ResearchScope.CUSTOMER
-            }
-            
-            finding = Finding(
-                title=result['title'],
-                summary=result['summary'],
-                evidence=[],  # Will be added separately
-                confidence=result.get('confidence', 0.5),
-                recency=result.get('recency', 'unknown'),
-                scope=scope_map.get(topic, ResearchScope.MARKET),
-                key_insights=result.get('key_insights', [])
-            )
-            
-            return finding
-            
-        except Exception as e:
-            logger.error("Failed to generate finding", topic=topic, error=str(e))
-            return None
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def generate_ideas(
-        self,
-        findings: List[Finding],
-        query: str,
-        business_context: Optional[Dict[str, Any]] = None
-    ) -> List[Idea]:
-        """Generate actionable ideas from findings"""
-        
-        system_prompt = """You are a strategic advisor generating actionable ideas from research.
-        
-        Based on the findings, generate 3-5 actionable ideas that:
-        1. Are specific and implementable
-        2. Address the original query
-        3. Have clear rationale based on findings
-        4. Include RICE scoring estimates
-        5. Note prerequisites and risks
-        
-        RICE Scoring:
-        - Reach: Number of people/entities affected (integer)
-        - Impact: 1 (minimal), 2 (moderate), 3 (massive)
-        - Confidence: 0-1 (probability of success)
-        - Effort: Person-days required (integer)
-        
-        Return ONLY valid JSON (no additional text):
-        {
-            "ideas": [
-                {
-                    "idea": "...",
-                    "rationale": "...",
-                    "reach": 1000,
-                    "impact": 2,
-                    "confidence": 0.7,
-                    "effort": 20,
-                    "prerequisites": ["..."],
-                    "risks": ["..."]
-                }
-            ]
-        }"""
-        
-        # Prepare findings summary
-        findings_summary = "\n".join([
-            f"- {f.title}: {f.summary} (confidence: {f.confidence})"
-            for f in findings[:10]
-        ])
-        
-        user_prompt = f"""
-Original Query: {query}
-
-Key Findings:
-{findings_summary}
-
-Business Context: {json.dumps(business_context) if business_context else 'General'}
-
-Generate actionable ideas based on these findings."""
-        
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=settings.synthesis_temperature
-            )
-            
-            result = json.loads(response.choices[0].message.content)
-            
-            ideas = []
-            for idea_data in result.get('ideas', []):
-                rice = RICEScore(
-                    reach=idea_data.get('reach', 100),
-                    impact=idea_data.get('impact', 2),
-                    confidence=idea_data.get('confidence', 0.5),
-                    effort=idea_data.get('effort', 10)
-                )
-                rice.calculate_score()
-                
-                idea = Idea(
-                    idea=idea_data['idea'],
-                    rationale=idea_data.get('rationale', ''),
-                    rice=rice,
-                    prerequisites=idea_data.get('prerequisites', []),
-                    risks=idea_data.get('risks', []),
-                    related_findings=[f.title for f in findings[:3]]
-                )
-                ideas.append(idea)
-            
-            # Sort by RICE score
-            ideas.sort(key=lambda i: i.rice.score or 0, reverse=True)
-            
-            return ideas
-            
-        except Exception as e:
-            logger.error("Failed to generate ideas", error=str(e))
-            return []
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def generate_executive_summary(
-        self,
-        findings: List[Finding],
-        ideas: List[Idea],
-        query: str
-    ) -> str:
-        """Generate executive summary of research"""
-        
-        system_prompt = """You are creating an executive summary of research findings.
-        
-        Write a concise 3-4 paragraph summary that:
-        1. Answers the original query
-        2. Highlights the most important findings
-        3. Recommends top 2-3 actions
-        4. Notes any significant risks or considerations
-        
-        Be direct, use data when available, and focus on actionable insights."""
-        
-        # Prepare context
-        top_findings = "\n".join([
-            f"- {f.title}: {f.summary}"
-            for f in findings[:5]
-        ])
-        
-        top_ideas = "\n".join([
-            f"- {i.idea} (RICE score: {i.rice.score:.1f})"
-            for i in ideas[:3]
-        ])
-        
-        user_prompt = f"""
-Query: {query}
-
-Top Findings:
-{top_findings}
-
-Recommended Actions:
-{top_ideas}
-
-Write an executive summary."""
-        
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.5,
-                max_tokens=settings.synthesis_max_tokens
-            )
-            
-            return response.choices[0].message.content
-            
-        except Exception as e:
-            logger.error("Failed to generate summary", error=str(e))
-            return "Executive summary generation failed. Please review the findings and ideas above."
-    
-    def validate_citations(self, finding: Finding, sources: List[Dict[str, Any]]) -> bool:
-        """Validate that findings have proper citations"""
-        # Simple validation - check if evidence URLs exist in sources
-        source_urls = {s.get('url') for s in sources if s.get('url')}
-        
-        for evidence in finding.evidence:
-            if evidence.url not in source_urls:
-                logger.warning("Invalid citation found", url=evidence.url)
-                return False
-        
-        return True
-    
-    def check_hallucination(self, text: str, sources: List[Dict[str, Any]]) -> float:
-        """Simple hallucination check - overlap between claims and sources"""
-        # This is a simplified version - in production, use more sophisticated methods
-        
-        text_lower = text.lower()
-        source_text = ' '.join([
-            s.get('content', '')[:1000] for s in sources
-        ]).lower()
-        
-        # Check for key terms overlap
-        text_words = set(text_lower.split())
-        source_words = set(source_text.split())
-        
-        if not text_words:
-            return 0.0
-        
-        overlap = len(text_words & source_words) / len(text_words)
-        return min(overlap, 1.0)
+        self.logger = logger.bind(component="synthesizer")
     
     def build_prompt(
         self,
@@ -342,92 +194,69 @@ Write an executive summary."""
         entities: Dict[str, Any],
         research_notes: Optional[str] = None
     ) -> str:
-        """Build token-tight prompt scaffold for chat generation
+        """Build token-tight prompt scaffold for synthesis"""
         
-        Structure:
-        - SYSTEM: Role + safety
-        - PROFILE: ≤ 8 short lines
-        - RECENT SUMMARY: ≤ 120 tokens
-        - LONG-TERM FACTS: 5-7 single-line bullets
-        - CURRENT TASK: Intent + entities
-        - RESEARCH NOTES: If available (≤ 150 tokens + citations)
-        """
-        sections = []
+        # Base instruction based on intent
+        base_instructions = {
+            "research": "Provide comprehensive research findings with specific details and examples.",
+            "news": "Summarize the latest news and developments with dates and sources.",
+            "pricing_research": "Present pricing information with specific numbers and comparisons.",
+            "competitor_analysis": "Analyze competitors with specific strengths, weaknesses, and market positioning.",
+            "db_lookup": "Present the database query results clearly and concisely.",
+            "general": "Be helpful and conversational. Acknowledge when you don't have specific information."
+        }
         
-        # SYSTEM section
-        sections.append("SYSTEM:")
-        sections.append("- You are an intelligent assistant with research capabilities and long-term memory.")
-        sections.append("- Be helpful, accurate, concise, and personalize using the provided profile and context.")
-        sections.append("")
+        instruction = base_instructions.get(intent, base_instructions["general"])
         
-        # PROFILE section (≤ 8 lines)
-        profile = context.get("profile", [])
-        if profile:
-            sections.append("PROFILE:")
-            for item in profile[:8]:
-                # Extract clean line from profile item
-                if isinstance(item, dict):
-                    line = item.get("memory") or item.get("content") or str(item)
-                else:
-                    line = str(item)
-                # Truncate to keep it short
-                if len(line) > 80:
-                    line = line[:77] + "..."
-                sections.append(f"- {line}")
-            sections.append("")
+        # Build context section
+        context_parts = []
         
-        # RECENT SUMMARY section (≤ 120 tokens ~480 chars)
-        summary = context.get("conversation_summary")
-        if summary:
-            sections.append("RECENT SUMMARY:")
-            if len(summary) > 480:
-                summary = summary[:477] + "..."
-            sections.append(summary)
-            sections.append("")
+        # User profile (if available)
+        if context.get("profile"):
+            profile_facts = [str(fact) for fact in context["profile"][:5]]
+            if profile_facts:
+                context_parts.append(f"User Context: {'; '.join(profile_facts)}")
         
-        # LONG-TERM FACTS section (5-7 bullets)
-        memories = context.get("ranked_memories", [])
-        if memories:
-            sections.append("LONG-TERM FACTS:")
-            for mem in memories[:7]:
-                if isinstance(mem, dict):
-                    fact = mem.get("memory") or mem.get("content") or str(mem)
-                else:
-                    fact = str(mem)
-                # Single line bullet
-                if len(fact) > 100:
-                    fact = fact[:97] + "..."
-                sections.append(f"- {fact}")
-            sections.append("")
+        # Recent conversation summary
+        if context.get("conversation_summary"):
+            context_parts.append(f"Recent Discussion: {context['conversation_summary'][:200]}...")
         
-        # CURRENT TASK section
-        sections.append("CURRENT TASK:")
-        sections.append(f"- Intent: {intent}")
-        if entities:
-            # Format entities compactly
-            entity_parts = []
-            for key, value in entities.items():
-                if value:
-                    if isinstance(value, list):
-                        entity_parts.append(f"{key}: {', '.join(str(v) for v in value[:3])}")
-                    else:
-                        entity_parts.append(f"{key}: {str(value)[:50]}")
-            if entity_parts:
-                sections.append(f"- Entities: [{', '.join(entity_parts)}]")
-        sections.append("")
-        
-        # RESEARCH NOTES section (if available)
+        # Research notes (if provided)
         if research_notes:
-            sections.append("RESEARCH NOTES:")
-            # Limit to ~150 tokens (600 chars) plus citations
-            if len(research_notes) > 600:
-                # Find a good break point
-                cutoff = research_notes[:600].rfind(". ")
-                if cutoff > 400:
-                    research_notes = research_notes[:cutoff + 1]
-                else:
-                    research_notes = research_notes[:597] + "..."
-            sections.append(research_notes)
-            sections.append("")
+            context_parts.append(f"Research Findings:\n{research_notes}")
         
-        return "\n".join(sections)
+        # Relevant memories
+        if context.get("ranked_memories"):
+            memories = [m.get("content", "") for m in context["ranked_memories"][:3]]
+            if memories:
+                context_parts.append(f"Relevant Context: {'; '.join(memories[:100] for m in memories)}")
+        
+        # Build the prompt
+        prompt = f"""You are an AI assistant. {instruction}
+
+CRITICAL RULES:
+- Only make factual claims when you have sources
+- Say "I don't have current information on that" if unsure
+- Be specific with numbers, dates, and facts
+- Acknowledge limitations honestly
+
+{chr(10).join(context_parts) if context_parts else "No additional context."}
+
+Remember: Quality over speculation. If you don't have solid information, say so."""
+        
+        return prompt
+    
+    def format_with_citations(
+        self,
+        content: str,
+        sources: List[Dict[str, Any]]
+    ) -> str:
+        """Format content with inline citations"""
+        
+        if not sources:
+            return content
+        
+        # Add footnote-style citations for key facts
+        # This is a simplified version - could be enhanced with NLP
+        
+        return content  # For now, return as-is (citations added by _add_source_citations)

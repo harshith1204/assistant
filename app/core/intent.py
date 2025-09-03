@@ -1,4 +1,4 @@
-"""Conversational Intent Detection and Routing System"""
+"""Conversational Intent Detection and Routing System with Deterministic Output"""
 
 import re
 from typing import Dict, Any, List, Optional, Tuple
@@ -14,22 +14,18 @@ logger = structlog.get_logger()
 
 
 class ConversationalIntent(Enum):
-    """Types of conversational intents"""
-    GREETING = "greeting"
+    """Strict intent categories for deterministic routing"""
     RESEARCH = "research"
+    NEWS = "news"
+    DB_LOOKUP = "db_lookup"
     CRM_ACTION = "crm_action"
     PMS_ACTION = "pms_action"
-    REPORT_GENERATION = "report_generation"
-    DATA_QUERY = "data_query"
-    TASK_MANAGEMENT = "task_management"
-    MEETING_SCHEDULING = "meeting_scheduling"
-    GENERAL_CHAT = "general_chat"
-    CLARIFICATION = "clarification"
-    FOLLOW_UP = "follow_up"
-    CONFIRMATION = "confirmation"
-    CANCELLATION = "cancellation"
-
-    # MongoDB Database Intents
+    PRICING_RESEARCH = "pricing_research"
+    COMPETITOR_ANALYSIS = "competitor_analysis"
+    PROFILE_UPDATE = "profile_update"
+    GENERAL = "general"
+    
+    # Legacy database intents (mapped to DB_LOOKUP)
     DB_FIND = "db.find"
     DB_AGGREGATE = "db.aggregate"
     DB_VECTOR_SEARCH = "db.vectorSearch"
@@ -67,6 +63,154 @@ class ActionType(Enum):
     CHAT = "chat"
     HELP = "help"
     STATUS = "status"
+
+
+# Structured intent detection system prompt
+INTENT_SYSTEM_PROMPT = """You are a strict intent router. Output valid JSON with these exact fields:
+{
+    "intent": "<one of: research, news, db_lookup, crm_action, pms_action, pricing_research, competitor_analysis, profile_update, general>",
+    "confidence": <0.0-1.0>,
+    "entities": {
+        "topics": [],
+        "collections": [],
+        "actions": [],
+        "queries": []
+    }
+}
+
+Intent definitions:
+- research: General research queries, market analysis, finding information
+- news: Current events, latest updates, breaking news
+- db_lookup: Database queries, finding records, data retrieval
+- crm_action: CRM operations (create lead, update contact, etc.)
+- pms_action: Project management operations (create task, update project, etc.)
+- pricing_research: Specific pricing/cost analysis
+- competitor_analysis: Competitor research and analysis
+- profile_update: User wants to save/update their profile information
+- general: Casual conversation, greetings, unclear requests
+
+Rules:
+- Pick news when recency/timeliness is critical
+- Pick db_lookup for MongoDB/database queries
+- Pick crm_action for CRM operations (not just viewing)
+- Pick profile_update for "remember that", "my name is", "I prefer"
+- Pick general ONLY when no tools are needed
+- Default to research if unclear but seems to need information
+
+Output ONLY valid JSON, no other text."""
+
+
+async def classify_intent(llm: AsyncGroq, user_text: str) -> ConversationalIntent:
+    """Classify intent with structured output - no freestyle"""
+    try:
+        prompt = [
+            {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_text}
+        ]
+        
+        response = await llm.chat.completions.create(
+            model=settings.groq_model,
+            messages=prompt,
+            temperature=0,  # Deterministic
+            max_tokens=200
+        )
+        
+        content = response.choices[0].message.content
+        data = safe_parse_json(content)
+        
+        intent_str = data.get("intent", "general")
+        confidence = data.get("confidence", 0.5)
+        
+        # Validate intent
+        try:
+            intent = ConversationalIntent(intent_str)
+        except ValueError:
+            logger.warning("Invalid intent detected", intent=intent_str)
+            intent = ConversationalIntent.GENERAL
+        
+        # Low confidence threshold - default to research for info-seeking
+        if confidence < 0.5 and seems_info_seeking(user_text):
+            intent = ConversationalIntent.RESEARCH
+        
+        return intent
+        
+    except Exception as e:
+        logger.error("Intent classification failed", error=str(e))
+        # Safe default based on keywords
+        return fallback_intent_detection(user_text)
+
+
+def safe_parse_json(text: str) -> Dict[str, Any]:
+    """Safely parse JSON from LLM output"""
+    try:
+        # Clean up common LLM mistakes
+        text = text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+        
+        return json.loads(text)
+    except:
+        logger.warning("Failed to parse JSON", text=text[:100])
+        return {"intent": "general", "confidence": 0.5, "entities": {}}
+
+
+def seems_info_seeking(text: str) -> bool:
+    """Check if text seems to be seeking information"""
+    info_patterns = [
+        "what", "how", "why", "when", "where", "who",
+        "tell me", "explain", "find", "search", "look",
+        "research", "analyze", "investigate"
+    ]
+    text_lower = text.lower()
+    return any(pattern in text_lower for pattern in info_patterns)
+
+
+def fallback_intent_detection(text: str) -> ConversationalIntent:
+    """Keyword-based fallback when LLM fails"""
+    text_lower = text.lower()
+    
+    # Profile update patterns
+    if any(kw in text_lower for kw in ["remember that", "my name is", "i prefer", "call me"]):
+        return ConversationalIntent.PROFILE_UPDATE
+    
+    # Database patterns
+    if any(kw in text_lower for kw in ["mongo", "database", "collection", "find documents", "query", "show me the", "list all"]):
+        return ConversationalIntent.DB_LOOKUP
+    
+    # CRM patterns
+    if any(kw in text_lower for kw in ["create lead", "update contact", "add customer", "crm"]):
+        return ConversationalIntent.CRM_ACTION
+    
+    # PMS patterns
+    if any(kw in text_lower for kw in ["create task", "update project", "add work item", "pms"]):
+        return ConversationalIntent.PMS_ACTION
+    
+    # News patterns
+    if any(kw in text_lower for kw in ["latest", "breaking", "news", "today", "current events"]):
+        return ConversationalIntent.NEWS
+    
+    # Pricing patterns
+    if any(kw in text_lower for kw in ["price", "cost", "pricing", "how much", "rates"]):
+        return ConversationalIntent.PRICING_RESEARCH
+    
+    # Competitor patterns
+    if any(kw in text_lower for kw in ["competitor", "competition", "rival", "versus", "compare"]):
+        return ConversationalIntent.COMPETITOR_ANALYSIS
+    
+    # Research patterns
+    if any(kw in text_lower for kw in ["research", "analyze", "investigate", "find out", "what is"]):
+        return ConversationalIntent.RESEARCH
+    
+    # Default to general only for clear small talk
+    greetings = ["hi", "hello", "hey", "thanks", "bye", "goodbye"]
+    if any(text_lower.strip() == g for g in greetings):
+        return ConversationalIntent.GENERAL
+    
+    # When in doubt, research (safer than general)
+    return ConversationalIntent.RESEARCH
 
 
 class ConversationalIntentDetector:
