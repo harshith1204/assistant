@@ -147,17 +147,23 @@ async def debug_user_memory(
         
         # Get profile
         profile = await memory_manager.get_profile(user_id)
+
+        # Also get profile-level memories separately (in case pinned logic fails)
+        profile_level_memories = []
+        if isinstance(all_memories, list):
+            for mem in all_memories:
+                metadata = mem.get("metadata", {}) if isinstance(mem, dict) else getattr(mem, "metadata", {}) or {}
+                if metadata.get("memory_level") == "profile":
+                    profile_level_memories.append(mem)
         
-        # Search memories if query provided
-        search_results = []
-        if conversation_id:
-            search_results = await memory_manager.search_memory(
-                query="*",  # Get all
-                conversation_id=conversation_id,
-                user_id=user_id,
-                limit=50,
-                search_scope="both"
-            )
+        # Search memories (always search to show memory functionality)
+        search_results = await memory_manager.search_memory(
+            query="*",  # Get all
+            conversation_id=conversation_id,
+            user_id=user_id,
+            limit=20,
+            search_scope="both"
+        )
         
         # Get short-term cache for conversation
         short_term = {}
@@ -174,11 +180,19 @@ async def debug_user_memory(
             "conversation_id": conversation_id,
             "total_memories": len(memories),
             "profile_facts": len(profile),
+            "profile_level_memories": len(profile_level_memories),
             "profile": profile[:10],  # First 10 profile facts
+            "profile_level": profile_level_memories[:10],  # Profile-level memories
             "recent_memories": memories[:20],  # Recent 20 memories
             "search_results": search_results[:10],  # Top 10 search results
             "short_term_cache": short_term,
-            "active_conversations": list(memory_manager.short_term_cache.keys())
+            "active_conversations": list(memory_manager.short_term_cache.keys()),
+            "memory_stats": {
+                "user_level": sum(1 for m in memories if (m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}).get("memory_level") == "user"),
+                "profile_level": sum(1 for m in memories if (m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}).get("memory_level") == "profile"),
+                "conversation_level": sum(1 for m in memories if (m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}).get("memory_level") == "conversation"),
+                "pinned": sum(1 for m in memories if (m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}).get("pinned") is True)
+            }
         }
     except Exception as e:
         logger.error("Failed to debug memory", error=str(e))

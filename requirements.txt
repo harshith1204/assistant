@@ -9,7 +9,7 @@ groq
 langchain
 tiktoken
 sentence-transformers
-
+mongodb-mcp-server
 # Web scraping and research
 httpx
 beautifulsoup4
@@ -18,7 +18,8 @@ readability-lxml
 trafilatura
 selenium
 webdriver-manager
-
+pymongo
+motor
 # Search APIs
 googlesearch-python
 ddgs
@@ -73,3 +74,4 @@ bcrypt
 mcp
 pymongo
 motor
+aiohttp

@@ -21,8 +21,6 @@ from app.core.research_engine import ResearchEngine
 from app.core.intent import (
     IntentDetector
 )
-from app.integrations.crm_client import CRMClient
-from app.integrations.pms_client import PMSClient
 from app.integrations.mcp_client import mongodb_mcp_client
 
 logger = structlog.get_logger()
@@ -40,25 +38,62 @@ class ChatEngine:
         self.research_engine = ResearchEngine()
         # Simple intent detection
         self.intent_detector = IntentDetector()
-        self.crm_client = CRMClient()
-        self.pms_client = PMSClient()
-        self.mongodb_client = mongodb_mcp_client
+        self.mcp_client = mongodb_mcp_client
         self.conversations: Dict[str, Conversation] = {}
         self._turn_counters: Dict[str, int] = {}
         self._cancel_signals: Dict[str, asyncio.Event] = {}
+
+        # Initialize MCP client connection (will be done asynchronously when needed)
+        # asyncio.create_task(self._init_mcp_client())  # Commented out to avoid event loop issues
         print("✅ ChatEngine initialized successfully")
-        
+
         # Action handlers mapping (for conversational routing)
         self.action_handlers = {
             "research_engine": self._handle_research_action,
-            "crm_client": self._handle_crm_action,
-            "pms_client": self._handle_pms_action,
-            "mongodb_client": self._handle_mongodb_action,
+            "mongodb_client": self._handle_unified_action,  # Unified handler for MCP client
             "report_generator": self._handle_report_action,
             "calendar_manager": self._handle_calendar_action,
             "chat_engine": self._handle_chat_action
         }
-        
+
+    async def _init_mcp_client(self):
+        """Initialize MCP client connection"""
+        try:
+            logger.info("Initializing MCP client connection...")
+            connected = await self.mcp_client.connect()
+            if connected:
+                logger.info("✅ MCP client connected successfully")
+                # Test the connection by listing tools
+                tools = await self.mcp_client.list_tools()
+                logger.info(f"MCP client found {len(tools)} tools", tools=[tool.get('name') for tool in tools])
+                # Run smoke test for MongoDB connectivity
+                await self._smoke_test_mongo()
+            else:
+                logger.warning("❌ Failed to connect MCP client")
+        except Exception as e:
+            logger.error("Failed to initialize MCP client", error=str(e))
+
+    async def _smoke_test_mongo(self):
+        """Smoke test MongoDB MCP connectivity"""
+        try:
+            logger.info("Running MCP smoke test...")
+            row_count = 0
+            async for r in self.mcp_client.find_documents("Lead", {"_id": {"$exists": True}}, {"_id": 1}, 1, user_id="smoke"):
+                if r.get("type") == "tool.output.data":
+                    logger.info("MCP smoke test OK", sample=r.get("data"))
+                    row_count += 1
+                    break
+                elif r.get("type") == "error":
+                    logger.error("MCP smoke test error", error=r)
+                    break
+                else:
+                    logger.debug("MCP smoke test received non-data event", event=r)
+
+            if row_count == 0:
+                logger.warning("MCP smoke test returned no rows (check collection names and server connectivity)")
+        except Exception as e:
+            logger.error("MCP smoke test failed", error=str(e))
+
     async def process_message(
         self,
         request: ChatRequest,
@@ -206,10 +241,21 @@ class ChatEngine:
 
             # ===== STAGE 2: UNDERSTAND INTENT =====
             intent_result = await self.intent_detector.detect_intent(request.message, context)
-            intent = intent_result.get("label", "general")
-            confidence = intent_result.get("confidence", 0.5)
-            entities = intent_result.get("entities", {})
 
+            # Normalize intent payload from intent.py (handle both "label" and "intent" fields)
+            raw_intent = intent_result.get("label") or intent_result.get("intent") or "general"
+            intent = str(raw_intent).lower()
+
+            confidence = intent_result.get("confidence", 0.5)
+            entities = intent_result.get("entities", {}) or {}
+
+            # Heuristic fallback: if user is clearly asking about DB-y stuff, force a db intent
+            msg_lower = (request.message or "").lower()
+            if intent == "general" and any(k in msg_lower for k in ["crm", "project", "task", "staff", "hrms", "mongo", "mongodb", "db", "collection"]):
+                intent = "db.find"
+
+            # Debug logging for intent detection
+            logger.info("Intent detection result", intent=intent, confidence=confidence, entities=entities)
 
             # Low confidence - request clarification
             if confidence < 0.5 and not request.skip_clarification:
@@ -226,6 +272,9 @@ class ChatEngine:
             routing_strategy = self._determine_routing_strategy(
                 intent, confidence, entities, request, context
             )
+
+            # Debug logging for routing strategy
+            logger.info("Routing strategy determined", intent=intent, strategy=routing_strategy)
 
             # ===== STAGE 4: EXECUTE =====
             research_notes: Optional[str] = None
@@ -691,19 +740,23 @@ class ChatEngine:
         try:
             if action == "create_note":
                 yield {"type": "crm_action_started", "content": "Creating note in CRM...", "action": action}
-                note_id = await self.crm_client.create_note(
+                note_id = await self.mcp_client.create_note(
+                    collection=settings.mongodb_crm_collection or "crm_notes",
                     lead_id=params.get("lead_id", "default"),
                     subject=params.get("subject", "Note from conversation"),
-                    description=params.get("content", conversation.messages[-1].content)
+                    description=params.get("content", conversation.messages[-1].content),
+                    user_id=user_id
                 )
                 yield {"type": "crm_action_complete", "content": f"✅ Note created successfully in CRM (ID: {note_id})", "result": {"note_id": note_id}}
             elif action == "create_task":
                 yield {"type": "crm_action_started", "content": "Creating task in CRM...", "action": action}
-                task_id = await self.crm_client.create_task(
+                task_id = await self.mcp_client.create_task(
+                    collection=settings.mongodb_crm_collection or "crm_notes",
                     business_id=params.get("business_id", "default"),
                     name=params.get("title", "Task from conversation"),
                     description=params.get("description", ""),
-                    priority=params.get("priority", "MEDIUM")
+                    priority=params.get("priority", "MEDIUM"),
+                    user_id=user_id
                 )
                 yield {"type": "crm_action_complete", "content": f"✅ Task created successfully (ID: {task_id})", "result": {"task_id": task_id}}
             else:
@@ -723,20 +776,24 @@ class ChatEngine:
         try:
             if action == "create_work_item":
                 yield {"type": "pms_action_started", "content": "Creating work item in project system...", "action": action}
-                work_item_id = await self.pms_client.create_work_item(
+                work_item_id = await self.mcp_client.create_work_item(
+                    collection=settings.mongodb_pms_collection or "pms_pages",
                     project_id=params.get("project_id", "default"),
                     title=params.get("title", "Work item from conversation"),
                     description=params.get("description", ""),
                     item_type=params.get("type", "TASK"),
-                    priority=params.get("priority", "MEDIUM")
+                    priority=params.get("priority", "MEDIUM"),
+                    user_id=user_id
                 )
                 yield {"type": "pms_action_complete", "content": f"✅ Work item created successfully (ID: {work_item_id})", "result": {"work_item_id": work_item_id}}
             elif action == "create_page":
                 yield {"type": "pms_action_started", "content": "Creating documentation page...", "action": action}
-                page_id = await self.pms_client.create_page(
+                page_id = await self.mcp_client.create_page(
+                    collection=settings.mongodb_pms_collection or "pms_pages",
                     project_id=params.get("project_id", "default"),
                     title=params.get("title", "Documentation"),
-                    content=params.get("content", "")
+                    content=params.get("content", ""),
+                    user_id=user_id
                 )
                 yield {"type": "pms_action_complete", "content": f"✅ Documentation page created (ID: {page_id})", "result": {"page_id": page_id}}
             else:
@@ -744,6 +801,34 @@ class ChatEngine:
         except Exception as e:
             logger.error("PMS action failed", error=str(e))
             yield {"type": "error", "content": f"Project action failed: {str(e)}"}
+
+    async def _handle_unified_action(
+        self,
+        routing: Dict[str, Any],
+        conversation: Conversation,
+        user_id: Optional[str]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Unified handler for MCP client actions (CRM, PMS, and MongoDB operations)"""
+        intent = routing.get("intent", "")
+        action = routing.get("action")
+        params = routing.get("parameters", {})
+
+        try:
+            # Route based on intent type
+            if intent == "crm_action":
+                async for result in self._handle_crm_action(routing, conversation, user_id):
+                    yield result
+            elif intent == "pms_action":
+                async for result in self._handle_pms_action(routing, conversation, user_id):
+                    yield result
+            else:
+                # Handle MongoDB database operations
+                async for result in self._handle_mongodb_action(routing, conversation, user_id):
+                    yield result
+
+        except Exception as e:
+            logger.error("Unified action failed", error=str(e), intent=intent)
+            yield {"type": "error", "content": f"Action failed: {str(e)}", "intent": intent}
 
     async def _handle_mongodb_action(
         self,
@@ -756,10 +841,40 @@ class ChatEngine:
         entities = routing.get("entities", {})
         params = routing.get("parameters", {})
 
+        # Log that MCP is being called
+        logger.info("MCP handler called", intent=intent, entities=entities, params=params)
+
         try:
             # Extract collection and query details from entities
             collections = entities.get("collections", [])
-            collection = collections[0] if collections else params.get("collection", "default")
+            collection = collections[0] if collections else params.get("collection", "test_db")  # Default to test_db
+
+            # If collection is missing, infer from message/entities
+            if not collections and collection == "test_db":
+                msg = (conversation.messages[-1].content if conversation.messages else "").lower()
+                inferred = None
+
+                # Priority-based inference (most specific first)
+                if "lead status" in msg or ("status" in msg and ("lead" in msg or "customer" in msg)):
+                    inferred = "leadStatus"
+                elif any(x in msg for x in ["activity", "activities"]) and not "status" in msg:
+                    inferred = "activity"
+                elif any(x in msg for x in ["note", "notes", "comment", "comments"]) and not "lead" in msg:
+                    inferred = "notes"
+                elif any(x in msg for x in ["task", "tasks", "todo", "work item"]):
+                    inferred = "task"
+                elif any(x in msg for x in ["meeting", "meetings", "appointment", "call"]):
+                    inferred = "meeting"
+                elif any(x in msg for x in ["crm", "lead", "leads", "deal", "customer", "client"]):
+                    inferred = "Lead"
+                elif any(x in msg for x in ["project", "projects", "sprint", "milestone"]):
+                    inferred = "ProjectManagement.project"
+                elif any(x in msg for x in ["staff", "employee", "hr", "personnel"]):
+                    inferred = "Staff.staff"
+
+                if inferred:
+                    collection = inferred
+                    entities["collections"] = [inferred]
 
             # Determine operation type from intent
             if intent == "db.find":
@@ -771,7 +886,7 @@ class ChatEngine:
                     # Simple query parsing - could be enhanced
                     filter_query.update({"$text": {"$search": " ".join(entities["queries"])}})
 
-                async for result in self.mongodb_client.find_documents(
+                async for result in self.mcp_client.find_documents(
                     collection=collection,
                     filter_query=filter_query,
                     limit=params.get("limit", 10),
@@ -792,9 +907,10 @@ class ChatEngine:
                         {"$limit": 10}
                     ]
 
-                async for result in self.mongodb_client.aggregate_documents(
+                async for result in self.mcp_client.aggregate_documents(
                     collection=collection,
                     pipeline=pipeline,
+                    limit=params.get("limit", 50),
                     user_id=user_id
                 ):
                     yield result
@@ -816,10 +932,34 @@ class ChatEngine:
                 # In practice, you'd call your embedding service here
                 query_vector = [0.1] * settings.mongodb_vector_dimensions  # Placeholder
 
-                async for result in self.mongodb_client.vector_search(
-                    collection=collection,
-                    query_vector=query_vector,
-                    limit=params.get("limit", 5),
+                # For vector search, we'd need to implement this properly in MCP
+                # For now, use aggregate with vector search pipeline
+                vector_pipeline = [
+                    {
+                        "$vectorSearch": {
+                            "index": settings.mongodb_vector_index_name,
+                            "path": settings.mongodb_vector_path,
+                            "queryVector": query_vector,
+                            "numCandidates": 200,
+                            "limit": params.get("limit", 5)
+                        }
+                    },
+                    {
+                        "$project": {
+                            "_id": 1,
+                            "title": 1,
+                            "content": 1,
+                            "score": {"$meta": "vectorSearchScore"}
+                        }
+                    }
+                ]
+
+                async for result in self.mcp_client.call_tool(
+                    tool_name="mongodb.aggregate",
+                    arguments={
+                        "collection": collection,
+                        "pipeline": vector_pipeline
+                    },
                     user_id=user_id
                 ):
                     yield result
@@ -828,8 +968,11 @@ class ChatEngine:
                 yield {"type": "mongodb_started", "content": "Running MongoDB command...", "operation": "runCommand"}
 
                 command = params.get("command", {})
-                async for result in self.mongodb_client.run_command(
-                    command=command,
+                async for result in self.mcp_client.call_tool(
+                    tool_name="mongodb.runCommand",
+                    arguments={
+                        "command": command
+                    },
                     user_id=user_id
                 ):
                     yield result
@@ -850,6 +993,15 @@ class ChatEngine:
         except Exception as e:
             logger.error("MongoDB action failed", error=str(e), intent=intent)
             yield {"type": "error", "content": f"Database operation failed: {str(e)}", "operation": intent}
+
+        # Always provide feedback that MCP was attempted
+        yield {
+            "type": "mongodb_attempted",
+            "content": f"I attempted to access the database collection '{collection}' via MCP. If you see 'no access to data' messages, please check that the MCP server is running and properly configured.",
+            "collection": collection,
+            "intent": intent,
+            "available_collections": settings.mongodb_allowed_collections
+        }
     
     async def _handle_report_action(
         self,
@@ -857,9 +1009,25 @@ class ChatEngine:
         conversation: Conversation,
         user_id: Optional[str]
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        yield {"type": "report_generation_started", "content": "Generating report based on our conversation..."}
-        summary = await self._generate_conversation_summary(conversation)
-        yield {"type": "report_ready", "content": "Report generated successfully!", "report": summary, "format_options": ["PDF", "Word", "Markdown"]}
+        """Handle report generation requests, including CRM reports"""
+
+        # Check if this is a CRM report request
+        message_text = ""
+        if conversation.messages:
+            message_text = conversation.messages[-1].content.lower()
+
+        is_crm_report = any(word in message_text for word in ["crm", "customer", "lead", "sales", "account", "deal"])
+
+        if is_crm_report:
+            # Generate CRM report
+            yield {"type": "report_generation_started", "content": "Generating CRM report with real data..."}
+            crm_report = await self._generate_crm_report(conversation, user_id)
+            yield {"type": "report_ready", "content": "CRM report generated successfully!", "report": crm_report, "format_options": ["PDF", "Word", "Markdown", "CSV"]}
+        else:
+            # Generate conversation summary report
+            yield {"type": "report_generation_started", "content": "Generating report based on our conversation..."}
+            summary = await self._generate_conversation_summary(conversation)
+            yield {"type": "report_ready", "content": "Report generated successfully!", "report": summary, "format_options": ["PDF", "Word", "Markdown"]}
     
     async def _handle_calendar_action(
         self,
@@ -1249,6 +1417,17 @@ class ChatEngine:
         domain_count = sum(1 for domain in research_domains if domain in message_lower)
         if domain_count >= 2:  # Multiple research domains suggest research needed
             return True
+
+        # Check for database/data queries that should use MCP
+        database_keywords = [
+            "database", "data", "collection", "records", "documents",
+            "find", "search", "query", "lookup", "retrieve", "fetch",
+            "show me", "tell me", "what's in", "list", "display"
+        ]
+
+        database_count = sum(1 for keyword in database_keywords if keyword in message_lower)
+        if database_count >= 1:  # Any database keyword suggests MCP usage
+            return False  # Don't research, use MCP instead
 
         # Check conversation context for research patterns
         if context.get("profile"):
@@ -1764,6 +1943,127 @@ Provide 3 short, specific questions that would naturally continue the conversati
             "duration": (datetime.now(timezone.utc) - conversation.created_at).total_seconds(),
             "topics": conversation.context.topics
         }
+
+    async def _generate_crm_report(
+        self,
+        conversation: Conversation,
+        user_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Generate a comprehensive CRM report with real data"""
+
+        report_data = {
+            "title": "CRM Data Report",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "sections": [],
+            "summary": "",
+            "recommendations": []
+        }
+
+        try:
+            # Section 1: CRM Leads Overview
+            leads_data = []
+            leads_count = 0
+
+            async for result in self.mcp_client.find_crm_leads(limit=100, user_id=user_id):
+                if result.get("type") == "tool.output.data" and result.get("data"):
+                    leads_data.append(result["data"])
+                    leads_count += 1
+
+            # Section 2: CRM Statistics
+            stats_data = []
+            async for result in self.mcp_client.aggregate_crm_stats(user_id=user_id):
+                if result.get("type") == "tool.output.data" and result.get("data"):
+                    stats_data.append(result["data"])
+
+            # Section 3: CRM Accounts (if available)
+            accounts_data = []
+            accounts_count = 0
+
+            async for result in self.mcp_client.find_crm_accounts(limit=50, user_id=user_id):
+                if result.get("type") == "tool.output.data" and result.get("data"):
+                    accounts_data.append(result["data"])
+                    accounts_count += 1
+
+            # Build report sections
+            report_data["sections"] = [
+                {
+                    "title": "CRM Leads Overview",
+                    "type": "leads",
+                    "count": leads_count,
+                    "data": leads_data[:10],  # Show first 10 leads
+                    "description": f"Found {leads_count} CRM leads in total"
+                },
+                {
+                    "title": "CRM Statistics",
+                    "type": "statistics",
+                    "data": stats_data,
+                    "description": "Lead distribution by stage and status"
+                },
+                {
+                    "title": "CRM Accounts",
+                    "type": "accounts",
+                    "count": accounts_count,
+                    "data": accounts_data[:10],  # Show first 10 accounts
+                    "description": f"Found {accounts_count} CRM accounts"
+                }
+            ]
+
+            # Generate AI summary
+            stats_summary = ""
+            if stats_data:
+                stats_text = "\n".join([f"- {stat.get('_id', 'Unknown')}: {stat.get('count', 0)} leads" for stat in stats_data])
+                stats_summary = f"Lead distribution:\n{stats_text}"
+
+            summary_prompt = f"""
+            Generate a concise executive summary for this CRM report:
+
+            Total Leads: {leads_count}
+            Total Accounts: {accounts_count}
+            Statistics: {stats_summary}
+
+            Focus on key insights and actionable recommendations.
+            """
+
+            summary_response = await self.groq_client.chat.completions.create(
+                model=settings.groq_model,
+                messages=[
+                    {"role": "system", "content": "Generate a concise CRM report summary"},
+                    {"role": "user", "content": summary_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=300
+            )
+
+            report_data["summary"] = summary_response.choices[0].message.content
+
+            # Generate recommendations
+            rec_prompt = f"""
+            Based on this CRM data, provide 3-5 actionable recommendations:
+
+            Leads: {leads_count}
+            Accounts: {accounts_count}
+            Statistics: {stats_summary}
+            """
+
+            rec_response = await self.groq_client.chat.completions.create(
+                model=settings.groq_model,
+                messages=[
+                    {"role": "system", "content": "Generate CRM recommendations"},
+                    {"role": "user", "content": rec_prompt}
+                ],
+                temperature=0.4,
+                max_tokens=200
+            )
+
+            recommendations_text = rec_response.choices[0].message.content
+            report_data["recommendations"] = [rec.strip() for rec in recommendations_text.split('\n') if rec.strip()]
+
+        except Exception as e:
+            logger.error("Failed to generate CRM report", error=str(e))
+            report_data["error"] = f"Failed to generate CRM report: {str(e)}"
+            report_data["summary"] = "Unable to generate CRM report due to data access issues."
+
+        return report_data
     
     async def _prepare_dual_context(
         self,
@@ -1834,6 +2134,26 @@ Provide 3 short, specific questions that would naturally continue the conversati
         if intent.startswith("db."):
             return "mongodb-first"
 
+        # CRM and PMS actions
+        if intent in ["crm_action", "pms_action"]:
+            return "mongodb-first"
+
+        # Check for database/data keywords in the message
+        message_lower = request.message.lower()
+        database_keywords = [
+            "database", "data", "collection", "records", "documents",
+            "find", "search", "query", "lookup", "retrieve", "fetch",
+            "show me", "tell me", "what's in", "list", "display",
+            "get", "check", "see", "view", "access", "connect to"
+        ]
+
+        if any(keyword in message_lower for keyword in database_keywords):
+            # If it looks like a database query but wasn't detected as such,
+            # route it to MCP with a general db.query intent
+            if not intent.startswith("db."):
+                return "mongodb-first"
+            return "mongodb-first"
+
         # Explicit research request
         if request.use_web_search or intent == "research":
             return "research-first"
@@ -1849,7 +2169,6 @@ Provide 3 short, specific questions that would naturally continue the conversati
             "tell me about", "explain", "market analysis",
             "competitor", "pricing", "trends", "statistics"
         ]
-        message_lower = request.message.lower()
         if any(keyword in message_lower for keyword in research_keywords):
             return "research-first"
 

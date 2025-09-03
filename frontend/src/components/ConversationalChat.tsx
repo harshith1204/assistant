@@ -87,6 +87,10 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
 
   // Initialize WebSocket connection
   useEffect(() => {
+    console.log('🔌 Initializing WebSocket connection...');
+    console.log('User ID:', effectiveUserId);
+    console.log('Business ID:', businessId);
+
     const ws = new WebSocketService(effectiveUserId, businessId);
     wsRef.current = ws;
 
@@ -104,7 +108,13 @@ export const ConversationalChat: React.FC<ConversationalChatProps> = ({ userId }
     ws.on('error', handleError);
 
     // Connect
-    ws.connect().catch(console.error);
+    console.log('🔌 Calling ws.connect()...');
+    ws.connect()
+      .then(() => console.log('🔌 WebSocket connect() promise resolved'))
+      .catch((error) => {
+        console.error('❌ WebSocket connect() promise rejected:', error);
+        addSystemMessage(`Connection failed: ${error.message}`);
+      });
 
     return () => {
       ws.disconnect();

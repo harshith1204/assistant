@@ -89,23 +89,71 @@ class Settings(BaseSettings):
     
     # MongoDB MCP Configuration
     mongodb_mcp_enabled: bool = Field(True, env="MONGODB_MCP_ENABLED")
-    mongodb_mcp_server_url: str = Field("http://localhost:3000", env="MONGODB_MCP_SERVER_URL")  # MongoDB MCP Server endpoint
+    mongodb_mcp_server_url: str = Field("http://localhost:8001", env="MONGODB_MCP_SERVER_URL")  # MongoDB MCP Server endpoint
     mongodb_connection_string: str = Field("", env="MONGODB_CONNECTION_STRING")
-    mongodb_database: str = Field("default", env="MONGODB_DATABASE")
+    mongodb_database: str = Field("crm", env="MONGODB_DATABASE")
     mongodb_readonly_user: str = Field("", env="MONGODB_READONLY_USER")
     mongodb_readonly_password: str = Field("", env="MONGODB_READONLY_PASSWORD")
 
     # MongoDB MCP Security & Limits
-    mongodb_allowed_collections: List[str] = Field(["users", "products", "orders", "analytics"], env="MONGODB_ALLOWED_COLLECTIONS")
-    mongodb_max_rows_per_query: int = Field(1000, env="MONGODB_MAX_ROWS_PER_QUERY")
+    mongodb_allowed_collections: List[str] = [
+        # CRM collections (from crm database)
+        "Lead", "leadStatus", "activity", "task", "notes", "meeting", "callLog", "timeLine",
+        "fields", "staffLogs", "document", "attachments", "appointment", "emailTemplate",
+        "templates", "segmentation", "leadScoreRule", "fieldGroup",
+
+        # Staff/HRMS collections (from Staff database)
+        "staff", "loginCredentials", "staffPermissions", "staffWorkInformation",
+
+        # Project Management collections (from ProjectManagement database)
+        "project", "workItem", "timeline", "page", "cycle", "members", "projectSetting",
+
+        # Business collections (from Business database)
+        "business", "businessPreferences", "websiteLeads", "contactUs"
+    ]
+
+    @property
+    def mongodb_allowed_collections_list(self) -> List[str]:
+        """Get allowed collections as a list"""
+        if isinstance(self.mongodb_allowed_collections, list):
+            return self.mongodb_allowed_collections
+        elif isinstance(self.mongodb_allowed_collections, str):
+            # Try to parse as JSON first
+            try:
+                import json
+                return json.loads(self.mongodb_allowed_collections)
+            except json.JSONDecodeError:
+                # Fall back to comma-separated parsing
+                return [col.strip() for col in self.mongodb_allowed_collections.split(",")]
+        return []
+    mongodb_max_rows_per_query: int = Field(200, env="MONGODB_MAX_ROWS_PER_QUERY")
     mongodb_query_timeout_seconds: int = Field(30, env="MONGODB_QUERY_TIMEOUT_SECONDS")
-    mongodb_tenant_field: str = Field("tenantId", env="MONGODB_TENANT_FIELD")
+    mongodb_tenant_field: str = Field("business_id", env="MONGODB_TENANT_FIELD")
 
     # Atlas Vector Search Configuration
     mongodb_vector_search_enabled: bool = Field(False, env="MONGODB_VECTOR_SEARCH_ENABLED")
     mongodb_vector_index_name: str = Field("doc_chunks_v1", env="MONGODB_VECTOR_INDEX_NAME")
     mongodb_vector_path: str = Field("embedding", env="MONGODB_VECTOR_PATH")
     mongodb_vector_dimensions: int = Field(1536, env="MONGODB_VECTOR_DIMENSIONS")
+
+    # MongoDB Collections for CRM/PMS operations
+    mongodb_crm_collection: str = Field("crm_notes", env="MONGODB_CRM_COLLECTION")
+    mongodb_pms_collection: str = Field("pms_pages", env="MONGODB_PMS_COLLECTION")
+
+    # Collection names for different modules
+    crm_leads_collection: str = Field("Lead", env="CRM_LEADS_COLLECTION")
+    crm_accounts_collection: str = Field("leadStatus", env="CRM_ACCOUNTS_COLLECTION")
+    crm_notes_collection: str = Field("notes", env="CRM_NOTES_COLLECTION")
+    crm_activities_collection: str = Field("activity", env="CRM_ACTIVITIES_COLLECTION")
+
+    pm_projects_collection: str = Field("project", env="PM_PROJECTS_COLLECTION")
+    pm_tasks_collection: str = Field("workItem", env="PM_TASKS_COLLECTION")
+    pms_pages_collection: str = Field("page", env="PMS_PAGES_COLLECTION")
+    pm_worklogs_collection: str = Field("workItem", env="PM_WORKLOGS_COLLECTION")
+
+    staff_directory_collection: str = Field("staff_directory", env="STAFF_DIRECTORY_COLLECTION")
+    hrms_leaves_collection: str = Field("hrms_leaves", env="HRMS_LEAVES_COLLECTION")
+    hrms_attendance_collection: str = Field("hrms_attendance", env="HRMS_ATTENDANCE_COLLECTION")
 
     # Session settings
     secret_key: str = Field(default_factory=lambda: ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)), env="SECRET_KEY")

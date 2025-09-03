@@ -14,8 +14,7 @@ from app.models import (
 from app.core.query_understanding import QueryUnderstanding
 from app.core.web_research import WebResearchPipeline
 from app.core.synthesis import ResearchSynthesizer
-from app.integrations.crm_client import CRMClient
-from app.integrations.pms_client import PMSClient
+from app.integrations.mcp_client import mongodb_mcp_client
 
 logger = structlog.get_logger()
 
@@ -26,8 +25,7 @@ class ResearchEngine:
     def __init__(self):
         self.query_understanding = QueryUnderstanding()
         self.synthesizer = ResearchSynthesizer()
-        self.crm_client = CRMClient()
-        self.pms_client = PMSClient()
+        self.mcp_client = mongodb_mcp_client
         self.status = ResearchStatus(status="idle", progress=0)
     
     async def run_research(self, request: ResearchRequest) -> ResearchBrief:
@@ -205,39 +203,45 @@ class ResearchEngine:
         brief: ResearchBrief,
         lead_id: Optional[str] = None,
         business_id: Optional[str] = None,
-        create_tasks: bool = False
+        create_tasks: bool = False,
+        user_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Save research brief to CRM"""
-        
-        logger.info("Saving to CRM", brief_id=brief.brief_id, lead_id=lead_id)
-        
+        """Save research brief to CRM via MCP"""
+
+        logger.info("Saving to CRM via MCP", brief_id=brief.brief_id, lead_id=lead_id)
+
         brief_dict = brief.model_dump()
-        result = await self.crm_client.save_research_brief(
-            brief_dict,
+        result = await self.mcp_client.save_research_brief(
+            brief=brief_dict,
+            crm_collection=settings.mongodb_crm_collection or "crm_notes",
             lead_id=lead_id,
             business_id=business_id,
-            create_tasks=create_tasks
+            create_tasks=create_tasks,
+            user_id=user_id
         )
-        
+
         return result
     
     async def save_to_pms(
         self,
         brief: ResearchBrief,
         project_id: str,
-        create_work_items: bool = False
+        create_work_items: bool = False,
+        user_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Save research brief to PMS"""
-        
-        logger.info("Saving to PMS", brief_id=brief.brief_id, project_id=project_id)
-        
+        """Save research brief to PMS via MCP"""
+
+        logger.info("Saving to PMS via MCP", brief_id=brief.brief_id, project_id=project_id)
+
         brief_dict = brief.model_dump()
-        result = await self.pms_client.save_research_brief(
-            brief_dict,
+        result = await self.mcp_client.save_research_brief(
+            brief=brief_dict,
+            pms_collection=settings.mongodb_pms_collection or "pms_pages",
             project_id=project_id,
-            create_work_items=create_work_items
+            create_work_items=create_work_items,
+            user_id=user_id
         )
-        
+
         return result
     
     async def ideas_to_plan(

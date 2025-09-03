@@ -164,8 +164,9 @@ class MemoryManager:
                     sanitized_meta = self._sanitize_metadata(meta)
                     
                     # Add to Mem0 with user_id for cross-conversation persistence
-                    # Mark this as user-level memory in metadata
-                    sanitized_meta["memory_level"] = "user"
+                    # Mark this as user-level memory in metadata (don't override if already set to profile)
+                    if sanitized_meta.get("memory_level") != self.PROFILE_LEVEL:
+                        sanitized_meta["memory_level"] = "user"
                     mem0_result = await asyncio.to_thread(
                         self.memory.add,
                         content,
@@ -420,6 +421,10 @@ class MemoryManager:
             # Extract and store entities/topics for important messages
             if message.role in [MessageRole.USER, MessageRole.ASSISTANT]:
                 await self._extract_and_store_entities(message, user_id)
+
+                # Extract and store profile facts for user messages
+                if message.role == MessageRole.USER and user_id:
+                    await self._extract_and_store_profile_facts(message, user_id)
                 
         except Exception as e:
             logger.error("Failed to update memory from message", error=str(e))
@@ -529,6 +534,73 @@ class MemoryManager:
                 
         except Exception as e:
             logger.error("Failed to extract entities", error=str(e))
+
+    async def _extract_and_store_profile_facts(
+        self,
+        message: ChatMessage,
+        user_id: str
+    ):
+        """Extract and store profile facts from user messages"""
+        try:
+            content_lower = message.content.lower()
+
+            # Profile fact patterns
+            profile_patterns = {
+                "name": [
+                    r"my name is (\w+)",
+                    r"i'm (\w+)",
+                    r"i am (\w+)",
+                    r"call me (\w+)"
+                ],
+                "occupation": [
+                    r"i work as a (.+)",
+                    r"i work as an (.+)",
+                    r"i'm a (.+)",
+                    r"i am a (.+)",
+                    r"my job is (.+)",
+                    r"i do (.+) for work"
+                ],
+                "location": [
+                    r"i live in (.+)",
+                    r"i'm from (.+)",
+                    r"my location is (.+)"
+                ],
+                "interests": [
+                    r"i like (.+)",
+                    r"i love (.+)",
+                    r"i'm interested in (.+)",
+                    r"my interests include (.+)"
+                ],
+                "preferences": [
+                    r"i prefer (.+)",
+                    r"my preference is (.+)"
+                ]
+            }
+
+            import re
+
+            # Extract profile facts
+            for fact_type, patterns in profile_patterns.items():
+                for pattern in patterns:
+                    matches = re.findall(pattern, content_lower)
+                    for match in matches:
+                        # Clean up the extracted fact
+                        fact_value = match.strip()
+
+                        # Remove common stop words and punctuation
+                        fact_value = re.sub(r'[.,!?]$', '', fact_value)
+
+                        if len(fact_value) > 2:  # Only store meaningful facts
+                            await self.set_profile_fact(
+                                user_id=user_id,
+                                key=fact_type,
+                                value=fact_value,
+                                priority=70 if fact_type in ["name", "occupation"] else 50
+                            )
+                            logger.info(f"Extracted profile fact: {fact_type} = {fact_value}", user_id=user_id)
+
+        except Exception as e:
+            logger.error("Failed to extract profile facts", error=str(e))
     
     async def clear_short_term_memory(self, conversation_id: str):
         """Clear short-term memory for a conversation"""

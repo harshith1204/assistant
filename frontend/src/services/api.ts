@@ -299,9 +299,15 @@ export class WebSocketService {
       if (this.userId) params.set('user_id', this.userId);
       if (this.businessId) params.set('business_id', this.businessId);
       const wsUrl = `${WS_BASE_URL}/ws/chat/${this.connectionId}?${params.toString()}`;
-      
+
+      console.log('🔌 Attempting WebSocket connection to:', wsUrl);
+      console.log('Connection ID:', this.connectionId);
+      console.log('User ID:', this.userId);
+      console.log('Business ID:', this.businessId);
+
       try {
         this.ws = new WebSocket(wsUrl);
+        console.log('🔌 WebSocket object created:', this.ws);
 
         this.ws.onopen = () => {
           console.log('WebSocket connected');
@@ -321,7 +327,8 @@ export class WebSocketService {
         };
 
         this.ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
+          console.error('❌ WebSocket error:', error);
+          console.error('WebSocket readyState:', this.ws?.readyState);
           reject(error);
         };
 

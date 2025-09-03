@@ -102,6 +102,13 @@ class ConversationalIntentDetector:
                 r'\b(generate|create|prepare|compile)\b',
                 r'\b(export|download|share)\b'
             ],
+            # CRM Report specific patterns
+            ConversationalIntent.CRM_ACTION: [
+                r'\b(crm|lead|contact|customer|client|deal)\b.*\b(report|summary|analysis)\b',
+                r'\b(report|summary|analysis)\b.*\b(crm|lead|contact|customer|client|deal)\b',
+                r'\b(sales|pipeline)\b.*\b(report|summary|analysis)\b',
+                r'\b(prepare|generate|create)\b.*\b(crm|sales)\b.*\b(report|summary)\b'
+            ],
             ConversationalIntent.MEETING_SCHEDULING: [
                 r'\b(meeting|appointment|call|demo|discussion)\b',
                 r'\b(schedule|book|arrange|set up)\b',
@@ -110,25 +117,36 @@ class ConversationalIntentDetector:
             ConversationalIntent.DB_FIND: [
                 r'\b(find|search|get|lookup|query)\b.*\b(records?|documents?|entries?|data)\b',
                 r'\b(show me|list|display)\b.*\b(from|in)\b.*\b(database|collection|table)\b',
-                r'\b(how many|count)\b.*\b(in|from)\b.*\b(collection|database)\b'
+                r'\b(how many|count)\b.*\b(in|from)\b.*\b(collection|database)\b',
+                r'\b(what|who|where|when)\b.*\b(is|are|was|were)\b.*\b(in|from)\b.*\b(database|db|collection)\b',
+                r'\b(get|fetch|retrieve)\b.*\b(all|some|any)\b.*\b(data|records|documents)\b',
+                r'\b(tell me|show me)\b.*\b(everything|all)\b.*\b(in|from)\b.*\b(database|collection)\b'
             ],
             ConversationalIntent.DB_AGGREGATE: [
                 r'\b(aggregate|group|sum|average|count|statistics|analytics)\b',
                 r'\b(group by|aggregate by|summarize)\b.*\b(data|records)\b',
-                r'\b(calculate|compute)\b.*\b(totals?|averages?|counts?|metrics)\b'
+                r'\b(calculate|compute)\b.*\b(totals?|averages?|counts?|metrics)\b',
+                r'\b(how many|what\'s the count|total number)\b.*\b(of|for)\b',
+                r'\b(group|sort|order)\b.*\b(by|according to)\b',
+                r'\b(average|mean|median|sum|total)\b.*\b(of|for)\b'
             ],
             ConversationalIntent.DB_VECTOR_SEARCH: [
                 r'\b(similar|related|semantic|vector)\b.*\b(search|find|query)\b',
                 r'\b(find documents?|search content)\b.*\b(about|related to|similar to)\b',
-                r'\b(what.*like|similar to|related to)\b'
+                r'\b(what.*like|similar to|related to)\b',
+                r'\b(find|search|look for)\b.*\b(similar|related|like)\b'
             ],
             ConversationalIntent.DB_RUN_COMMAND: [
                 r'\b(run|execute)\b.*\b(command|query|operation)\b',
-                r'\b(database|system)\b.*\b(command|info|status)\b'
+                r'\b(database|system)\b.*\b(command|info|status)\b',
+                r'\b(execute|run)\b.*\b(on|in)\b.*\b(database|db)\b'
             ],
             ConversationalIntent.DB_QUERY: [
                 r'\b(query|search|find|get)\b.*\b(database|collection|data)\b',
-                r'\b(look up|retrieve|fetch)\b.*\b(from|in)\b.*\b(database|collection)\b'
+                r'\b(look up|retrieve|fetch)\b.*\b(from|in)\b.*\b(database|collection)\b',
+                r'\b(check|see|view)\b.*\b(database|collection|table)\b',
+                r'\b(access|connect to)\b.*\b(database|db)\b',
+                r'\b(what\'s in|what do you have in|show me)\b.*\b(database|collection)\b'
             ]
         }
     
@@ -391,8 +409,8 @@ class ConversationalRouter:
         """Get handler for intent"""
         handlers = {
             "research": "research_engine",
-            "crm_action": "crm_client",
-            "pms_action": "pms_client",
+            "crm_action": "mongodb_client",  # Route CRM actions to MCP client
+            "pms_action": "mongodb_client",  # Route PMS actions to MCP client
             "report_generation": "report_generator",
             "meeting_scheduling": "calendar_manager",
             "db.find": "mongodb_client",
@@ -455,11 +473,26 @@ class IntentDetector:
                 "clarification_question": None
             }
 
+        # Database query patterns
+        database_keywords = [
+            "show me", "find", "list", "get", "display", "query", "search",
+            "retrieve", "fetch", "select", "database", "collection", "table",
+            "crm", "lead", "customer", "task", "meeting", "staff", "employee",
+            "hrms", "project", "data", "records", "documents"
+        ]
+        if any(keyword in message_lower for keyword in database_keywords):
+            return {
+                "label": "db.find",
+                "confidence": 0.9,
+                "entities": {},
+                "clarification_question": None
+            }
+
         # Research patterns
         research_keywords = [
-            "research", "find out", "look up", "search", "analyze", "investigate",
+            "research", "find out", "look up", "analyze", "investigate",
             "what is", "tell me about", "explain", "how does", "market", "competitor",
-            "pricing", "trends", "statistics", "data", "information"
+            "pricing", "trends", "statistics", "information"
         ]
         if any(keyword in message_lower for keyword in research_keywords):
             return {

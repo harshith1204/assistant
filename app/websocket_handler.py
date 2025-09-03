@@ -1,4 +1,4 @@
-"""Simplified WebSocket handler for keyword-based conversational chat"""
+"""WebSocket handler with MCP integration for CRM/PM/HRMS data"""
 
 import json
 import asyncio
@@ -13,6 +13,7 @@ from app.chat_models import (
     MessageRole, MessageType
 )
 from app.core.chat_engine import ChatEngine
+from app.integrations.mcp_client import mongodb_mcp_client
 
 logger = structlog.get_logger()
 
@@ -26,7 +27,7 @@ class DateTimeEncoder(json.JSONEncoder):
 
 
 class ConnectionManager:
-    """Simple connection manager for WebSocket chat"""
+    """Connection manager with MCP integration for WebSocket chat"""
 
     def __init__(self):
         print("🔧 Initializing ConnectionManager...")
@@ -38,6 +39,9 @@ class ConnectionManager:
         except Exception as e:
             print(f"❌ Failed to initialize chat engine: {e}")
             self.chat_engine = None
+
+        # Initialize MCP client
+        self.mcp_client = mongodb_mcp_client
 
     async def connect(
         self,
@@ -127,6 +131,14 @@ class ConnectionManager:
             print(f"📝 Message text: '{message_text}', User: {user_id}, Conversation: {conversation_id}")
             logger.info("Extracted message text", connection_id=connection_id, message_text=message_text, user_id=user_id)
 
+            # Check for database queries first
+            is_database_query = self._is_database_query(message_text)
+
+            if is_database_query:
+                # Handle database query
+                await self._handle_database_query(message_text, connection_id, user_id)
+                return
+
             # Simple keyword detection for research vs general chat
             is_research = self._is_research_query(message_text)
 
@@ -173,6 +185,149 @@ class ConnectionManager:
         ]
         message_lower = message.lower()
         return any(keyword in message_lower for keyword in research_keywords)
+
+    def _is_database_query(self, message: str) -> bool:
+        """Detect if message should query CRM/PM/HRMS databases"""
+        database_keywords = [
+            # CRM
+            "crm", "lead", "customer", "contact", "deal", "sales", "account", "opportunity",
+            # PM
+            "project", "task", "pm", "work item", "milestone", "sprint", "backlog",
+            # Staff/HRMS
+            "staff", "employee", "team", "personnel", "hr", "hrms", "leave", "vacation",
+            "who", "what", "show me", "list", "find", "get", "query", "database"
+        ]
+        message_lower = message.lower()
+
+        # Must have at least one database keyword
+        has_db_keyword = any(keyword in message_lower for keyword in database_keywords)
+
+        # Should not be a research query (avoid overlap)
+        is_research = self._is_research_query(message)
+
+        return has_db_keyword and not is_research
+
+    async def _handle_database_query(self, message: str, connection_id: str, user_id: Optional[str] = None):
+        """Handle CRM/PM/HRMS database queries"""
+        message_lower = message.lower()
+
+        try:
+            # CRM queries
+            if any(word in message_lower for word in ["crm", "lead", "customer", "contact", "deal", "sales"]):
+                await self.send_message(
+                    connection_id,
+                    WebSocketMessage(type="data_query", data={"source": "CRM", "query": message})
+                )
+
+                # Get CRM leads
+                async for result in self.mcp_client.find_crm_leads(
+                    filter_query={"status": {"$in": ["open", "active", "qualified"]}},
+                    limit=20,
+                    user_id=user_id
+                ):
+                    if result.get("type") == "tool.output.data" and result.get("data"):
+                        await self.send_message(
+                            connection_id,
+                            WebSocketMessage(type="data", data={
+                                "source": "CRM",
+                                "type": "lead",
+                                **result["data"]
+                            })
+                        )
+
+                # Get CRM stats
+                async for result in self.mcp_client.aggregate_crm_stats(user_id=user_id):
+                    if result.get("type") == "tool.output.data" and result.get("data"):
+                        await self.send_message(
+                            connection_id,
+                            WebSocketMessage(type="data", data={
+                                "source": "CRM",
+                                "type": "stats",
+                                **result["data"]
+                            })
+                        )
+
+            # PM queries
+            elif any(word in message_lower for word in ["project", "task", "pm", "work item", "milestone", "sprint"]):
+                await self.send_message(
+                    connection_id,
+                    WebSocketMessage(type="data_query", data={"source": "PM", "query": message})
+                )
+
+                # Get PM tasks
+                async for result in self.mcp_client.find_pm_tasks(
+                    filter_query={"status": {"$ne": "done"}},
+                    limit=30,
+                    user_id=user_id
+                ):
+                    if result.get("type") == "tool.output.data" and result.get("data"):
+                        await self.send_message(
+                            connection_id,
+                            WebSocketMessage(type="data", data={
+                                "source": "PM",
+                                "type": "task",
+                                **result["data"]
+                            })
+                        )
+
+                # Get PM stats
+                async for result in self.mcp_client.aggregate_pm_stats(user_id=user_id):
+                    if result.get("type") == "tool.output.data" and result.get("data"):
+                        await self.send_message(
+                            connection_id,
+                            WebSocketMessage(type="data", data={
+                                "source": "PM",
+                                "type": "stats",
+                                **result["data"]
+                            })
+                        )
+
+            # Staff/HRMS queries
+            elif any(word in message_lower for word in ["staff", "employee", "team", "personnel", "hr", "hrms", "leave", "vacation"]):
+                await self.send_message(
+                    connection_id,
+                    WebSocketMessage(type="data_query", data={"source": "HRMS", "query": message})
+                )
+
+                # Get staff directory
+                async for result in self.mcp_client.find_staff_directory(
+                    filter_query={},
+                    limit=50,
+                    user_id=user_id
+                ):
+                    if result.get("type") == "tool.output.data" and result.get("data"):
+                        await self.send_message(
+                            connection_id,
+                            WebSocketMessage(type="data", data={
+                                "source": "HRMS",
+                                "type": "staff",
+                                **result["data"]
+                            })
+                        )
+
+                # Get leave records if asking about availability
+                if any(word in message_lower for word in ["leave", "vacation", "off", "away", "available"]):
+                    async for result in self.mcp_client.find_hrms_leaves(
+                        filter_query={},
+                        limit=20,
+                        user_id=user_id
+                    ):
+                        if result.get("type") == "tool.output.data" and result.get("data"):
+                            await self.send_message(
+                                connection_id,
+                                WebSocketMessage(type="data", data={
+                                    "source": "HRMS",
+                                    "type": "leave",
+                                    **result["data"]
+                                })
+                            )
+
+        except Exception as e:
+            logger.error("Failed to handle database query", error=str(e))
+            await self.send_message(
+                connection_id,
+                WebSocketMessage(type="error", data={"error": f"Database query failed: {str(e)}"})
+            )
     
     async def stream_chat_response(
         self,
@@ -258,6 +413,38 @@ class ConnectionManager:
                         WebSocketMessage(type="research_error", data={
                             "error": event.get("message", "Research failed"),
                             "error_type": event.get("error_type", "unknown"),
+                            "conversation_id": request.conversation_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
+                    )
+                elif event_type == "report_generation_started":
+                    # Handle report generation start
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(type="report_progress", data={
+                            "content": event.get("content", "Generating report..."),
+                            "conversation_id": request.conversation_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
+                    )
+                elif event_type == "report_progress":
+                    # Handle report generation progress
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(type="report_progress", data={
+                            "content": event.get("content", "Report generation in progress..."),
+                            "conversation_id": request.conversation_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
+                    )
+                elif event_type == "report_ready":
+                    # Handle completed report
+                    report_data = event.get("report", {})
+                    await self.send_message(
+                        connection_id,
+                        WebSocketMessage(type="report_complete", data={
+                            "content": event.get("content", "Report generated successfully!"),
+                            "report": report_data,
                             "conversation_id": request.conversation_id,
                             "timestamp": datetime.now(timezone.utc).isoformat()
                         })
