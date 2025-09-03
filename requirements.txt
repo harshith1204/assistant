@@ -13,6 +13,7 @@ mongodb-mcp-server
 # Web scraping and research
 httpx
 beautifulsoup4
+requests
 newspaper3k
 readability-lxml
 trafilatura

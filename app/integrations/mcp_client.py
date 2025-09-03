@@ -1473,17 +1473,28 @@ mongodb_mcp_client = OfficialMCPClient()  # Stdio-based client for MongoDB MCP s
 # Auto-connect to MongoDB MCP server on import if connection string is available
 async def initialize_mongodb_mcp_client():
     """Initialize and connect the MongoDB MCP client (READ-ONLY ONLY)"""
-    if settings.mongodb_connection_string and settings.mongodb_mcp_enabled:
-        try:
-            logger.info("🔒 Auto-connecting to MongoDB MCP server in READ-ONLY mode...")
-            # SECURITY: Always use enforced read-only mode
-            await mongodb_mcp_client.connect_to_mongodb_server(read_only=settings.mongodb_readonly_enforced)
-            logger.info("✅ MongoDB MCP client connected successfully (READ-ONLY mode)")
-        except Exception as e:
-            logger.error("❌ Failed to auto-connect MongoDB MCP client", error=str(e))
-            logger.info("Note: Make sure Node.js and npm are installed for MCP server")
-    else:
-        logger.info("MongoDB MCP client not configured (missing connection string or disabled)")
+    if not settings.mongodb_connection_string:
+        logger.warning("⚠️  MongoDB connection string not configured. Skipping MCP client initialization.")
+        logger.info("To enable MongoDB MCP client, set MONGODB_CONNECTION_STRING environment variable")
+        return
+
+    if not settings.mongodb_mcp_enabled:
+        logger.info("MongoDB MCP integration disabled by configuration")
+        return
+
+    try:
+        logger.info("🔒 Auto-connecting to MongoDB MCP server in READ-ONLY mode...")
+        # SECURITY: Always use enforced read-only mode
+        await mongodb_mcp_client.connect_to_mongodb_server(read_only=settings.mongodb_readonly_enforced)
+        logger.info("✅ MongoDB MCP client connected successfully (READ-ONLY mode)")
+    except Exception as e:
+        logger.error("❌ Failed to auto-connect MongoDB MCP client", error=str(e))
+        logger.warning("MongoDB MCP client will not be available. Check your MongoDB connection string and network connectivity.")
+        logger.info("Troubleshooting steps:")
+        logger.info("1. Verify MongoDB connection string: mongodb://username:password@host:port/database")
+        logger.info("2. Ensure MongoDB server is running and accessible")
+        logger.info("3. Check network connectivity to MongoDB host")
+        logger.info("4. Verify user has read permissions on the specified database")
 
 async def create_official_mcp_client():
     """Factory function to create official MCP client with proper error handling"""

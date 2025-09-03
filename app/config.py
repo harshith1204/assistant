@@ -13,16 +13,6 @@ class Settings(BaseSettings):
     # API Keys
     groq_api_key: str = Field("", env="GROQ_API_KEY")
     
-    # CRM Configuration
-    crm_base_url: str = Field("https://stage-api.simpo.ai/crm", env="CRM_BASE_URL")
-    crm_api_key: Optional[str] = Field(None, env="CRM_API_KEY")
-    crm_auth_token: Optional[str] = Field(None, env="CRM_AUTH_TOKEN")
-    
-    # PMS Configuration
-    pms_base_url: str = Field("https://stage-api.simpo.ai/pms", env="PMS_BASE_URL")
-    pms_api_key: Optional[str] = Field(None, env="PMS_API_KEY")
-    pms_auth_token: Optional[str] = Field(None, env="PMS_AUTH_TOKEN")
-    
     # Database
     database_url: str = Field("sqlite:///./research.db", env="DATABASE_URL")
     redis_url: str = Field("redis://localhost:6379/0", env="REDIS_URL")
