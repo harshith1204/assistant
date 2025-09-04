@@ -13,7 +13,7 @@ from app.chat_models import (
     MessageRole, MessageType
 )
 from app.core.chat_engine import ChatEngine
-from app.integrations.mcp_client import mongodb_mcp_client
+from app.integrations.mcp_client import get_mongodb_mcp_client
 
 logger = structlog.get_logger()
 
@@ -41,8 +41,8 @@ class ConnectionManager:
             print(f"❌ Failed to initialize chat engine: {error_message}")
             self.chat_engine = None
 
-        # Initialize MCP client
-        self.mcp_client = mongodb_mcp_client
+        # Initialize MCP client using singleton pattern
+        self.mcp_client = get_mongodb_mcp_client()
 
     async def connect(
         self,

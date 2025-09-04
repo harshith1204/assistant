@@ -15,7 +15,7 @@ from app.chat_models import (
 )
 from app.core.memory_manager import MemoryManager
 from app.core.agent import AgenticAssistant
-from app.integrations.mcp_client import mongodb_mcp_client
+from app.integrations.mcp_client import get_mongodb_mcp_client
 
 logger = structlog.get_logger()
 
@@ -28,7 +28,7 @@ class ChatEngine:
         print("🤖 Initializing Agentic ChatEngine")
         self.memory_manager = MemoryManager()
         self.agentic_assistant = AgenticAssistant()
-        self.mcp_client = mongodb_mcp_client
+        self.mcp_client = get_mongodb_mcp_client()
         self.conversations: Dict[str, Conversation] = {}
         self._cancel_signals: Dict[str, asyncio.Event] = {}
 

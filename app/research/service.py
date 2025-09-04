@@ -166,6 +166,54 @@ class AgenticResearchService:
                 "confidence": 0.0
             }
 
+    async def _quick_research_with_agent(self, query: str, num_sources: int = 3) -> Dict[str, Any]:
+        """Perform quick research using agent tools (moved here to avoid circular imports)"""
+        # Import here to avoid circular import
+        try:
+            from app.core.agent import WebSearchTool, ContentAnalysisTool
+
+            # Use web search tool directly
+            search_tool = WebSearchTool()
+            search_result = await search_tool._execute_impl(
+                query=query,
+                num_results=num_sources
+            )
+
+            if not search_result.get("success"):
+                return {
+                    "success": False,
+                    "error": "Web search failed",
+                    "query": query
+                }
+
+            # Analyze the search results
+            search_content = "\n".join([
+                f"{result['title']}: {result.get('snippet', '')}"
+                for result in search_result.get("results", [])
+            ])
+
+            analysis_tool = ContentAnalysisTool(None)  # No LLM client for basic analysis
+            analysis_result = await analysis_tool._execute_impl(
+                content=search_content,
+                analysis_type="insights"
+            )
+
+            return {
+                "success": True,
+                "query": query,
+                "search_results": search_result,
+                "analysis": analysis_result,
+                "method": "quick_research"
+            }
+
+        except Exception as e:
+            logger.error("Quick research with agent failed", error=str(e))
+            return {
+                "success": False,
+                "error": f"Quick research failed: {str(e)}",
+                "query": query
+            }
+
     def _parse_research_results(self, agent_response: str, query: str) -> Dict[str, Any]:
         """Parse the agent's research response into structured format"""
 
@@ -254,8 +302,8 @@ class AgenticResearchService:
 
         try:
             if self.agent:
-                # Use agent tools for quick research
-                return await self._quick_research_with_agent(query, num_sources)
+                # Use agent tools for quick research (new implementation to avoid circular imports)
+                return await self._quick_research_with_agent_new(query, num_sources)
             else:
                 # Use simplified approach
                 return await self._perform_simplified_research(query, max_sources=num_sources)
@@ -268,8 +316,11 @@ class AgenticResearchService:
                 "query": query
             }
 
-    async def _quick_research_with_agent(self, query: str, num_sources: int = 3) -> Dict[str, Any]:
-        """Perform quick research using agent tools"""
+    async def _quick_research_with_agent_old(self, query: str, num_sources: int = 3) -> Dict[str, Any]:
+        """Perform quick research using agent tools (old implementation)"""
+        if not self.agent:
+            return await self._perform_simplified_research(query, max_sources=num_sources)
+
         # Use web search tool directly
         search_result = await self.agent.execute_tool_by_name(
             "web_search",

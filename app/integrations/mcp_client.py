@@ -1470,6 +1470,17 @@ class MongoDBMCPClient:
 # Global client instances - using stdio-based client as per MongoDB MCP server design
 mongodb_mcp_client = OfficialMCPClient()  # Stdio-based client for MongoDB MCP server
 
+# Singleton pattern to ensure only one MCP client instance
+_mcp_client_instance = None
+
+def get_mongodb_mcp_client():
+    """Get the singleton MCP client instance"""
+    global _mcp_client_instance
+    if _mcp_client_instance is None:
+        _mcp_client_instance = mongodb_mcp_client
+        logger.info("🔧 MCP client singleton created")
+    return _mcp_client_instance
+
 # Auto-connect to MongoDB MCP server on import if connection string is available
 async def initialize_mongodb_mcp_client():
     """Initialize and connect the MongoDB MCP client (READ-ONLY ONLY)"""

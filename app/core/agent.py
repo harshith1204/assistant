@@ -4,16 +4,18 @@ import json
 import asyncio
 import uuid
 from typing import Dict, Any, List, Optional, Callable, AsyncGenerator
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from dataclasses import dataclass, field
 from groq import AsyncGroq
 import structlog
+from functools import lru_cache
+import hashlib
 
 from app.config import settings
 from app.core.memory_manager import MemoryManager
 from app.research.service import AgenticResearchService
-from app.integrations.mcp_client import mongodb_mcp_client
+from app.integrations.mcp_client import get_mongodb_mcp_client
 
 logger = structlog.get_logger()
 
@@ -156,6 +158,38 @@ class ReasoningEngine:
     def __init__(self, llm_client: AsyncGroq):
         self.client = llm_client
         self.model = settings.llm_model
+        self.response_cache: Dict[str, Dict[str, Any]] = {}
+        self.cache_ttl = timedelta(minutes=30)  # Cache responses for 30 minutes
+
+    def _get_cache_key(self, prompt: str, user_message: str) -> str:
+        """Generate a cache key for LLM requests"""
+        content = f"{prompt}:{user_message}"
+        return hashlib.md5(content.encode()).hexdigest()
+
+    def _get_cached_response(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Get cached response if still valid"""
+        if cache_key in self.response_cache:
+            cached = self.response_cache[cache_key]
+            if datetime.now(timezone.utc) - cached['timestamp'] < self.cache_ttl:
+                logger.info("Using cached LLM response", cache_key=cache_key[:8])
+                return cached['response']
+            else:
+                # Remove expired cache entry
+                del self.response_cache[cache_key]
+        return None
+
+    def _cache_response(self, cache_key: str, response: Dict[str, Any]):
+        """Cache LLM response"""
+        self.response_cache[cache_key] = {
+            'response': response,
+            'timestamp': datetime.now(timezone.utc)
+        }
+        # Limit cache size to prevent memory issues
+        if len(self.response_cache) > 100:
+            # Remove oldest entry
+            oldest_key = min(self.response_cache.keys(),
+                           key=lambda k: self.response_cache[k]['timestamp'])
+            del self.response_cache[oldest_key]
 
     async def reason_about_request(self, user_message: str, context: AgentContext) -> List[Thought]:
         """Analyze user request and generate reasoning chain"""
@@ -196,17 +230,26 @@ Context:
 Generate your reasoning chain:"""
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.3,
-                max_tokens=1000
-            )
+            # Check cache first
+            cache_key = self._get_cache_key(system_prompt, user_prompt)
+            cached_result = self._get_cached_response(cache_key)
+            if cached_result:
+                result = cached_result
+            else:
+                # Make LLM call if not cached
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=1000
+                )
 
-            result = json.loads(response.choices[0].message.content)
+                result = json.loads(response.choices[0].message.content)
+                # Cache the result
+                self._cache_response(cache_key, result)
 
             thoughts = []
             for thought_data in result.get("thoughts", []):
@@ -274,17 +317,26 @@ Context: {context.metadata}
 Create a detailed execution plan:"""
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.2,
-                max_tokens=1500
-            )
+            # Check cache first
+            cache_key = self._get_cache_key(system_prompt, user_prompt)
+            cached_result = self._get_cached_response(cache_key)
+            if cached_result:
+                result = cached_result
+            else:
+                # Make LLM call if not cached
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.2,
+                    max_tokens=1500
+                )
 
-            result = json.loads(response.choices[0].message.content)
+                result = json.loads(response.choices[0].message.content)
+                # Cache the result
+                self._cache_response(cache_key, result)
 
             plan = Plan(
                 steps=result.get("steps", []),
@@ -399,7 +451,7 @@ class AgenticAssistant:
         self.memory_manager = MemoryManager()
         self.tool_registry = ToolRegistry()
         self.research_service = AgenticResearchService(self)  # Pass self for agent reference
-        self.mcp_client = mongodb_mcp_client
+        self.mcp_client = get_mongodb_mcp_client()
 
         # Initialize core tools
         self._register_core_tools()
