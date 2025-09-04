@@ -11,7 +11,6 @@ import structlog
 import uvicorn
 
 from app.config import settings
-from app.core.chat_engine import ChatEngine
 from app.websocket_handler import websocket_endpoint
 
 # Suppress websockets library deprecation warning
@@ -42,9 +41,8 @@ structlog.configure(
 
 logger = structlog.get_logger()
 
-# Global chat engine instance
+# Global settings info
 print(f"🔧 Loading settings - Model: {settings.llm_model}, API Key set: {bool(settings.groq_api_key)}")
-chat_engine = ChatEngine()
 
 
 @asynccontextmanager
@@ -95,19 +93,15 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    # Get MCP health status
-    mcp_health = await chat_engine.check_mcp_health()
-
     return {
         "status": "healthy",
         "version": settings.app_version,
         "debug": settings.debug,
-        "mcp_status": mcp_health,
         "features": {
-            "chat": True,
+            "chat": False,  # Chat engine removed
             "research": True,
-            "memory": True,
-            "database": mcp_health.get("status") == "connected"
+            "memory": False,  # Memory manager was part of chat engine
+            "database": True
         }
     }
 
@@ -116,16 +110,13 @@ async def health_check():
 async def mcp_status():
     """Get MCP client status"""
     try:
-        health = await chat_engine.check_mcp_health()
+        from app.integrations.mcp_client import mongodb_mcp_client
+        # Check if MCP client is connected
+        connected = hasattr(mongodb_mcp_client, '_client') and mongodb_mcp_client._client is not None
         return {
-            "status": health.get("status", "unknown"),
-            "connected": health.get("status") == "connected",
-            "tools_count": health.get("tools_count", 0) if health.get("tools_count") else 0,
+            "status": "connected" if connected else "disconnected",
+            "connected": connected,
             "available_collections": settings.mongodb_allowed_collections_list,
-            "last_checked": health.get("timestamp", None),
-            "cache_stats": health.get("cache_stats", {}),
-            "optimizations": health.get("optimizations", {}),
-            "details": health
         }
     except Exception as e:
         logger.error("Failed to get MCP status", error=str(e))
@@ -141,17 +132,15 @@ async def reconnect_mcp():
     """Manually trigger MCP reconnection"""
     try:
         logger.info("Manually triggering MCP reconnection...")
-        # Reinitialize MCP client
-        await chat_engine._init_mcp_client()
-
-        # Check new status
-        health = await chat_engine.check_mcp_health()
-
+        from app.integrations.mcp_client import mongodb_mcp_client
+        # Try to reconnect
+        connected = await mongodb_mcp_client.connect()
+        
         return {
-            "success": True,
+            "success": connected,
             "message": "MCP reconnection attempted",
-            "status": health.get("status", "unknown"),
-            "connected": health.get("status") == "connected"
+            "status": "connected" if connected else "disconnected",
+            "connected": connected
         }
     except Exception as e:
         logger.error("Failed to reconnect MCP", error=str(e))
@@ -195,76 +184,27 @@ async def debug_user_memory(
     user_id: str,
     conversation_id: Optional[str] = Query(None)
 ) -> Dict[str, Any]:
-    """Debug endpoint to view all memories for a user"""
-    try:
-        memory_manager = chat_engine.memory_manager
-        
-        # Get all user memories
-        all_memories = await asyncio.to_thread(
-            memory_manager.memory.get_all,
-            user_id=user_id
-        )
-        
-        # Extract results
-        if isinstance(all_memories, dict) and "results" in all_memories:
-            memories = all_memories["results"]
-        elif isinstance(all_memories, list):
-            memories = all_memories
-        else:
-            memories = []
-        
-        # Get profile
-        profile = await memory_manager.get_profile(user_id)
-
-        # Also get profile-level memories separately (in case pinned logic fails)
-        profile_level_memories = []
-        if isinstance(all_memories, list):
-            for mem in all_memories:
-                metadata = mem.get("metadata", {}) if isinstance(mem, dict) else getattr(mem, "metadata", {}) or {}
-                if metadata.get("memory_level") == "profile":
-                    profile_level_memories.append(mem)
-        
-        # Search memories (always search to show memory functionality)
-        search_results = await memory_manager.search_memory(
-            query="*",  # Get all
-            conversation_id=conversation_id,
-            user_id=user_id,
-            limit=20,
-            search_scope="both"
-        )
-        
-        # Get short-term cache for conversation
-        short_term = {}
-        if conversation_id and conversation_id in memory_manager.short_term_cache:
-            cache_data = memory_manager.short_term_cache[conversation_id]
-            short_term = {
-                "message_count": len(cache_data.get("messages", [])),
-                "recent_messages": cache_data.get("messages", [])[-5:],
-                "timestamp": cache_data.get("timestamp", "").isoformat() if cache_data.get("timestamp") else None
-            }
-       
-        return {
-            "user_id": user_id,
-            "conversation_id": conversation_id,
-            "total_memories": len(memories),
-            "profile_facts": len(profile),
-            "profile_level_memories": len(profile_level_memories),
-            "profile": profile[:10],  # First 10 profile facts
-            "profile_level": profile_level_memories[:10],  # Profile-level memories
-            "recent_memories": memories[:20],  # Recent 20 memories
-            "search_results": search_results[:10],  # Top 10 search results
-            "short_term_cache": short_term,
-            "active_conversations": list(memory_manager.short_term_cache.keys()),
-            "memory_stats": {
-                "user_level": sum(1 for m in memories if (m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}).get("memory_level") == "user"),
-                "profile_level": sum(1 for m in memories if (m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}).get("memory_level") == "profile"),
-                "conversation_level": sum(1 for m in memories if (m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}).get("memory_level") == "conversation"),
-                "pinned": sum(1 for m in memories if (m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}).get("pinned") is True)
-            }
+    """Debug endpoint - memory manager has been removed with chat engine"""
+    return {
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "message": "Memory manager has been removed with the chat engine",
+        "total_memories": 0,
+        "profile_facts": 0,
+        "profile_level_memories": 0,
+        "profile": [],
+        "profile_level": [],
+        "recent_memories": [],
+        "search_results": [],
+        "short_term_cache": {},
+        "active_conversations": [],
+        "memory_stats": {
+            "user_level": 0,
+            "profile_level": 0,
+            "conversation_level": 0,
+            "pinned": 0
         }
-    except Exception as e:
-        logger.error("Failed to debug memory", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+    }
 
 
 

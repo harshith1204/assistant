@@ -12,7 +12,6 @@ from app.chat_models import (
     ChatRequest, WebSocketMessage,
     MessageRole, MessageType
 )
-from app.core.chat_engine import ChatEngine
 from app.integrations.mcp_client import mongodb_mcp_client
 
 logger = structlog.get_logger()
@@ -33,12 +32,8 @@ class ConnectionManager:
         print("🔧 Initializing ConnectionManager...")
         self.active_connections: Dict[str, WebSocket] = {}
         self.connection_user: Dict[str, str] = {}  # connection_id -> user_id
-        try:
-            self.chat_engine = ChatEngine()
-            print("✅ Chat engine initialized successfully")
-        except Exception as e:
-            print(f"❌ Failed to initialize chat engine: {e}")
-            self.chat_engine = None
+        # Chat engine has been removed
+        self.chat_engine = None
 
         # Initialize MCP client
         self.mcp_client = mongodb_mcp_client
@@ -157,17 +152,20 @@ class ConnectionManager:
                 WebSocketMessage(type="typing", data={"status": "thinking"})
             )
 
-            # Check if chat engine is available
-            if not self.chat_engine:
-                print(f"❌ Chat engine not available for connection {connection_id}")
-                await self.send_message(
-                    connection_id,
-                    WebSocketMessage(type="error", data={"error": "Chat engine not initialized. Check API key configuration."})
+            # Chat engine has been removed - send simple response
+            print(f"ℹ️ Chat engine has been removed, sending basic response")
+            await self.send_message(
+                connection_id,
+                WebSocketMessage(
+                    type="message_complete",
+                    data={
+                        "conversation_id": request.conversation_id,
+                        "content": "Chat engine functionality has been removed. Database queries and MCP client operations are still available.",
+                        "role": "assistant",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
                 )
-                return
-
-            # Stream the response
-            await self.stream_chat_response(connection_id, request, user_id)
+            )
 
         except Exception as e:
             logger.error("Failed to handle chat message", error=str(e))
@@ -329,151 +327,7 @@ class ConnectionManager:
                 WebSocketMessage(type="error", data={"error": f"Database query failed: {str(e)}"})
             )
     
-    async def stream_chat_response(
-        self,
-        connection_id: str,
-        request: ChatRequest,
-        user_id: Optional[str] = None
-    ):
-        """Stream chat response using the chat engine"""
-        try:
-            logger.info("Starting to stream chat response", connection_id=connection_id, request_message=request.message, user_id=user_id)
-            # Stream response from chat engine
-            full_response = ""
-            event_count = 0
-            has_received_events = False
 
-            async for event in self.chat_engine.stream_message(request, user_id):
-                has_received_events = True
-                event_count += 1
-                logger.info("Received chat engine event", connection_id=connection_id, event_type=event.get("type"), event_count=event_count)
-                event_type = event.get("type", "")
-
-                if event_type == "chat.token":
-                    # Send token chunks
-                    delta = event.get("delta", "")
-                    full_response += delta
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(
-                            type="token",
-                            data={"delta": delta, "conversation_id": request.conversation_id}
-                        )
-                    )
-                    print(f"🔤 Sent token: '{delta}'")
-                elif event_type == "chat.final":
-                    # Send final message
-                    message_data = event.get("message", {})
-                    final_message = {
-                        "conversation_id": request.conversation_id,
-                        "content": full_response,
-                        "role": message_data.get("role", "assistant"),
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-                    print(f"🏁 Sending final message: {final_message}")
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(
-                            type="message_complete",
-                            data=final_message
-                        )
-                    )
-                elif event_type in ["research.started", "research.done", "memory.written", "memory.used"]:
-                    # Forward research/memory events
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(type=event_type, data=event)
-                    )
-                elif event_type == "research.chunk":
-                    # Forward research progress chunks
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(type="research_progress", data={
-                            "content": event.get("content", ""),
-                            "conversation_id": request.conversation_id,
-                            "timestamp": datetime.now(timezone.utc).isoformat()
-                        })
-                    )
-                elif event_type == "research_progress":
-                    # Enhanced research progress event
-                    progress_data = event.get("data", {})
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(type="research_progress", data={
-                            "content": event.get("content", "Research in progress..."),
-                            "sources_count": progress_data.get("sources_count", 0),
-                            "conversation_id": request.conversation_id,
-                            "timestamp": datetime.now(timezone.utc).isoformat()
-                        })
-                    )
-                elif event_type == "error" and event.get("stage") == "research":
-                    # Handle research-specific errors
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(type="research_error", data={
-                            "error": event.get("message", "Research failed"),
-                            "error_type": event.get("error_type", "unknown"),
-                            "conversation_id": request.conversation_id,
-                            "timestamp": datetime.now(timezone.utc).isoformat()
-                        })
-                    )
-                elif event_type == "report_generation_started":
-                    # Handle report generation start
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(type="report_progress", data={
-                            "content": event.get("content", "Generating report..."),
-                            "conversation_id": request.conversation_id,
-                            "timestamp": datetime.now(timezone.utc).isoformat()
-                        })
-                    )
-                elif event_type == "report_progress":
-                    # Handle report generation progress
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(type="report_progress", data={
-                            "content": event.get("content", "Report generation in progress..."),
-                            "conversation_id": request.conversation_id,
-                            "timestamp": datetime.now(timezone.utc).isoformat()
-                        })
-                    )
-                elif event_type == "report_ready":
-                    # Handle completed report
-                    report_data = event.get("report", {})
-                    await self.send_message(
-                        connection_id,
-                        WebSocketMessage(type="report_complete", data={
-                            "content": event.get("content", "Report generated successfully!"),
-                            "report": report_data,
-                            "conversation_id": request.conversation_id,
-                            "timestamp": datetime.now(timezone.utc).isoformat()
-                        })
-                    )
-
-            # If no events were received, send a fallback response
-            if not has_received_events:
-                logger.warning("No events received from chat engine, sending fallback response", connection_id=connection_id)
-                fallback_message = "I received your message but couldn't process it properly. Please try again."
-                await self.send_message(
-                    connection_id,
-                    WebSocketMessage(
-                        type="message_complete",
-                        data={
-                            "conversation_id": request.conversation_id,
-                            "content": fallback_message,
-                            "role": "assistant",
-                            "timestamp": datetime.now(timezone.utc).isoformat()
-                        }
-                    )
-                )
-
-        except Exception as e:
-            logger.error("Failed to stream chat response", error=str(e))
-            # Send error message to client
-            await self.send_message(
-                connection_id,
-                WebSocketMessage(type="error", data={"error": str(e)})
-            )
 
 
 # Global connection manager
